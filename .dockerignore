@@ -1,0 +1,7 @@
+# The build context only needs the source. `target/` is 1.6G of local build
+# output that the image builds for itself, and the node directories are not part
+# of the project.
+target/
+docker/volumes/
+.git/
+*.log

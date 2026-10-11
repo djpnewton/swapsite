@@ -99,6 +99,24 @@ impl BitcoinRpc {
             .map_err(|e| ChainError::Rpc(format!("gettxout reported {btc} BTC: {e}")))
     }
 
+    /// Mine `blocks` blocks, paying the subsidy to a fresh address from this
+    /// wallet.
+    ///
+    /// Regtest has no other way to advance the chain, so a control panel needs
+    /// this and nothing else should have it.
+    pub fn generate(&self, blocks: u32) -> Result<Vec<Txid>, ChainError> {
+        let address = Chain::new_address(self)?;
+        self.call("generatetoaddress", json!([blocks, address.to_string()]))
+    }
+
+    /// The wallet's trusted balance.
+    pub fn balance(&self) -> Result<Amount, ChainError> {
+        let balances: Value = self.call("getbalances", json!([]))?;
+        let btc = trusted_btc(&balances);
+        Amount::from_btc(btc)
+            .map_err(|e| ChainError::Rpc(format!("getbalances reported {btc} BTC: {e}")))
+    }
+
     fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T, ChainError> {
         let request = json!({
             "jsonrpc": "1.0",
@@ -277,9 +295,44 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// Pull `mine.trusted` out of a `getbalances` result.
+///
+/// Split out so the shape is pinned without a node to ask. Core nests it two
+/// levels deep, and `trusted` is the one that leaves out coinbase still
+/// maturing.
+fn trusted_btc(balances: &Value) -> f64 {
+    balances
+        .get("mine")
+        .and_then(|mine| mine.get("trusted"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_trusted_balance_is_the_one_that_is_spendable_now() {
+        let balances = json!({
+            "mine": {
+                "trusted": 3.5,
+                "untrusted_pool": 50.0,
+                "immature": 12.5
+            },
+            "watchonly": { "trusted": 99.0 }
+        });
+
+        assert_eq!(trusted_btc(&balances), 3.5);
+    }
+
+    #[test]
+    fn a_missing_or_odd_balance_reads_as_nothing_rather_than_panicking() {
+        // A wallet with no balance omits the field on some Core versions.
+        assert_eq!(trusted_btc(&json!({ "mine": {} })), 0.0);
+        assert_eq!(trusted_btc(&json!({})), 0.0);
+        assert_eq!(trusted_btc(&json!({ "mine": { "trusted": "3.5" } })), 0.0);
+    }
 
     #[test]
     fn parses_a_url() {

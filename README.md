@@ -44,12 +44,29 @@ target/debug/coordinator serve --listen 127.0.0.1:8090 \
   --wasm target/wasm32-unknown-unknown/release/swapsite_wasm.wasm --dev-pay
 ```
 
+## Running it in containers
+
+One command builds everything and brings up the nodes with the relay, the maker,
+the coordinator and a regtest control panel:
+
+```bash
+./scripts/docker-web.sh
+```
+
+- taker page: <http://127.0.0.1:8095/>
+- control panel: <http://127.0.0.1:8091/> (mine blocks, see heights, balances,
+  channel capacity and swap states)
+- relay: <http://127.0.0.1:3110/>
+
+The services are behind a compose profile, so `docker compose up -d` still gives
+you just the three nodes and the `regtest-*.sh` scripts keep working.
+
 ## Layout
 
 | Crate | Contents |
 | ----- | -------- |
 | `core/` | the domain: HTLC, Lightning leg, swap state, maker decision logic. No I/O, so it compiles to WASM. |
 | `adapters/` | the I/O: Bitcoin Core JSON-RPC, `lncli`, swap records on disk, one shared HTTP server and client. |
-| `cli/` | `swapx` (drive one leg), `maker` (the daemon), `relay` (observe and broadcast), `coordinator` (quotes, brokering, static files). |
+| `cli/` | `swapx` (drive one leg), `maker` (the daemon), `relay` (observe and broadcast), `coordinator` (quotes, brokering, static files), `regtestd` (a dev control panel). |
 | `wasm/` | the taker, compiled to `wasm32-unknown-unknown` with no imports. |
-| `web/` | the page, and the JS that loads the module and talks to the relay. |
+| `web/` | the page, the control panel, and the JS that loads the module and talks to the relay. |

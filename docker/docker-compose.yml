@@ -24,7 +24,10 @@ services:
       - "28332:28332"
       - "28333:28333"
     volumes:
-      - bitcoind-data:/home/bitcoin/.bitcoin
+      # Where bitcoind actually writes. The image runs as root, so its data
+      # directory is `/root/.bitcoin` - mounting anywhere else gives an empty
+      # volume and a chain that dies with the container.
+      - bitcoind-data:/root/.bitcoin
     healthcheck:
       test:
         [
@@ -46,6 +49,9 @@ services:
       - --listen=0.0.0.0:9735
       - --rpclisten=0.0.0.0:10009
       - --restlisten=0.0.0.0:8080
+      # A DNS name in the certificate, so another container can reach this node
+      # as `lnd-maker:10009` and still verify TLS.
+      - --tlsextradomain=lnd-maker
       - --accept-keysend
       - --bitcoin.active
       - --bitcoin.regtest
@@ -56,7 +62,9 @@ services:
       - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
       - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
     volumes:
-      - lnd-maker-data:/home/lnd/.lnd
+      # As with bitcoind: root runs LND, and LND takes its data directory from
+      # `/etc/passwd` rather than from `$HOME`, so this stays `/root/.lnd`.
+      - lnd-maker-data:/root/.lnd
     ports:
       - "9735:9735"
       - "10009:10009"
@@ -64,6 +72,14 @@ services:
     depends_on:
       bitcoind:
         condition: service_healthy
+    healthcheck:
+      # `lncli` finds its TLS cert and macaroon the same way lnd does, so this
+      # reports whether the node can actually be driven, not just that the
+      # process is up.
+      test: ["CMD-SHELL", "lncli --network=regtest getinfo > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   lnd-taker:
     image: polarlightning/lnd:0.18.3-beta
@@ -76,6 +92,7 @@ services:
       - --listen=0.0.0.0:9735
       - --rpclisten=0.0.0.0:10009
       - --restlisten=0.0.0.0:8080
+      - --tlsextradomain=lnd-taker
       - --accept-keysend
       - --bitcoin.active
       - --bitcoin.regtest
@@ -86,7 +103,7 @@ services:
       - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
       - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
     volumes:
-      - lnd-taker-data:/home/lnd/.lnd
+      - lnd-taker-data:/root/.lnd
     ports:
       - "9736:9735"
       - "10010:10009"
@@ -94,13 +111,137 @@ services:
     depends_on:
       bitcoind:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "lncli --network=regtest getinfo > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
-  # coordinator and frontend are added once there is code to run.
-  # They join this network and reach:
-  #   bitcoind  -> http://bitcoind:18443        (bitcoin / bitcoin)
-  #   lnd-maker -> https://lnd-maker:8080       (see docs/regtest.md)
+  # --- the web scenario -----------------------------------------------------
+  #
+  # Behind a profile so the six regtest scripts keep working unchanged: they drive
+  # binaries on the host and want these exact ports. Bring this up instead with
+  #   docker compose --profile web up -d
+  #
+  # Every service sets its own entrypoint, because the image's would drop to a
+  # user that cannot read the admin macaroon.
+
+  relay:
+    profiles: ["web"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime
+    image: swapsite-services:latest
+    container_name: swapsite-relay
+    entrypoint: ["/app/relay"]
+    command:
+      - --listen=0.0.0.0:3100
+      - --bitcoin-url=http://bitcoin:bitcoin@bitcoind:18443
+    # The browser fetches this one directly, so it needs a host port.
+    ports:
+      - "3110:3100"
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+
+  maker:
+    profiles: ["web"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime
+    image: swapsite-services:latest
+    container_name: swapsite-maker
+    entrypoint: ["/app/maker"]
+    command:
+      - serve
+      - --dir=/swaps
+      - --listen=0.0.0.0:3200
+      - --bitcoin-url=http://bitcoin:bitcoin@bitcoind:18443
+      - --lnd-rpc=lnd-maker:10009
+      - --lnd-dir=/lnd-maker
+    volumes:
+      - swaps:/swaps
+      # Read only: the maker has no business writing to a node's data directory.
+      - lnd-maker-data:/lnd-maker:ro
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+      lnd-maker:
+        condition: service_healthy
+
+  coordinator:
+    profiles: ["web"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime
+    image: swapsite-services:latest
+    container_name: swapsite-coordinator
+    entrypoint: ["/app/coordinator"]
+    command:
+      - serve
+      - --listen=0.0.0.0:8090
+      - --maker-url=http://maker:3200
+      # Handed to the browser, so it has to be the host-visible address rather
+      # than the one this container would use.
+      - --relay-url=http://127.0.0.1:3110
+      - --dir=/records
+      - --web=/app/web
+      - --wasm=/app/swapsite_wasm.wasm
+      - --dev-pay
+      - --lnd-rpc=lnd-taker:10009
+      - --lnd-dir=/lnd-taker
+    ports:
+      - "8095:8090"
+    volumes:
+      - records:/records
+      - lnd-taker-data:/lnd-taker:ro
+    depends_on:
+      maker:
+        condition: service_started
+      relay:
+        condition: service_started
+
+  regtestd:
+    profiles: ["web"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime
+    image: swapsite-services:latest
+    container_name: swapsite-regtestd
+    entrypoint: ["/app/regtestd"]
+    command:
+      - --listen=0.0.0.0:8091
+      - --bitcoin-url=http://bitcoin:bitcoin@bitcoind:18443
+      - --dir=/swaps
+      - --web=/app/web
+      - --maker-lnd-rpc=lnd-maker:10009
+      - --maker-lnd-dir=/lnd-maker
+      - --taker-lnd-rpc=lnd-taker:10009
+      - --taker-lnd-dir=/lnd-taker
+      - --taker-url=http://127.0.0.1:8095/
+    ports:
+      - "8091:8091"
+    volumes:
+      # The maker's records, read only: the panel shows them and must not touch
+      # them.
+      - swaps:/swaps:ro
+      - lnd-maker-data:/lnd-maker:ro
+      - lnd-taker-data:/lnd-taker:ro
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+      lnd-maker:
+        condition: service_healthy
+      lnd-taker:
+        condition: service_healthy
 
 volumes:
   bitcoind-data:
   lnd-maker-data:
   lnd-taker-data:
+  swaps:
+  records:

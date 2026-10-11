@@ -119,6 +119,14 @@ struct NodeConfig {
         default_value = "docker/docker-compose.yml"
     )]
     compose: PathBuf,
+    /// `host:port` of the node's gRPC port. Set with `--lnd-dir` it runs
+    /// `lncli` directly, which is what a container has to do: there is no
+    /// docker in there to exec into.
+    #[arg(long)]
+    lnd_rpc: Option<String>,
+    /// Root holding the node's `tls.cert` and macaroon.
+    #[arg(long)]
+    lnd_dir: Option<PathBuf>,
     #[arg(long, default_value = "regtest")]
     network: String,
     /// Seconds between ticks.
@@ -145,8 +153,14 @@ impl NodeConfig {
         )?)
     }
 
-    fn lightning(&self) -> LnCli {
-        LnCli::new(self.compose.clone(), &self.node, &self.network)
+    fn lightning(&self) -> Result<LnCli> {
+        Ok(LnCli::from_config(
+            self.lnd_rpc.as_deref(),
+            self.lnd_dir.as_deref(),
+            self.compose.clone(),
+            &self.node,
+            &self.network,
+        )?)
     }
 
     fn store(&self) -> Result<SwapStore> {
@@ -218,7 +232,7 @@ fn default_refund_fee() -> u64 {
 /// Build, persist and broadcast the maker's side of a new swap.
 fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<SwapRecord> {
     let chain = config.chain()?;
-    let lightning = config.lightning();
+    let lightning = config.lightning()?;
     let store = config.store()?;
 
     let amount_sat = request.amount;
@@ -420,7 +434,7 @@ impl Api {
 /// One pass over every swap. Everything that changes does so in here.
 fn tick(config: &NodeConfig) -> Result<()> {
     let chain = config.chain()?;
-    let lightning = config.lightning();
+    let lightning = config.lightning()?;
     let store = config.store()?;
 
     let height = chain.height()?;

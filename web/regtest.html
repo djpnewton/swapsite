@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>regtest control</title>
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/regtest.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>regtest control</h1>
+        <p class="lead">
+          A development panel. It mines blocks and reads node wallets, which is
+          why it is its own service: the coordinator must never be able to do
+          either.
+        </p>
+      </header>
+
+      <section class="card">
+        <h2>Chain</h2>
+        <div class="row">
+          <label for="blocks">Blocks to mine</label>
+          <input id="blocks" type="number" min="1" max="200" step="1" value="1" />
+        </div>
+        <div class="actions">
+          <button id="mine" class="primary">Mine</button>
+          <button data-mine="1">1</button>
+          <button data-mine="6">6</button>
+          <button data-mine="144">144</button>
+        </div>
+        <p class="quote" id="chain">loading…</p>
+      </section>
+
+      <section class="card">
+        <h2>Nodes</h2>
+        <div id="nodes"></div>
+      </section>
+
+      <section class="card">
+        <h2>Swaps</h2>
+        <div id="swaps"></div>
+      </section>
+
+      <footer><span id="foot">loading…</span></footer>
+    </main>
+    <script type="module" src="/regtest.js"></script>
+  </body>
+</html>

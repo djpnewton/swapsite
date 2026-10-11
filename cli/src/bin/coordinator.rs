@@ -70,6 +70,15 @@ enum Cmd {
             default_value = "docker/docker-compose.yml"
         )]
         compose: PathBuf,
+        /// `host:port` of the taker's gRPC port, for `--dev-pay`.
+        ///
+        /// Set with `--lnd-dir` it runs `lncli` directly, which is what a
+        /// container has to do: there is no docker in there to exec into.
+        #[arg(long)]
+        lnd_rpc: Option<String>,
+        /// Root holding the taker node's `tls.cert` and macaroon.
+        #[arg(long)]
+        lnd_dir: Option<PathBuf>,
         /// Expose a dev endpoint that pays the taker's invoice on its behalf.
         ///
         /// A real deployment does not have this: the page pays through WebLN and
@@ -120,10 +129,23 @@ fn main() -> Result<()> {
             claim_fee,
             network,
             compose,
+            lnd_rpc,
+            lnd_dir,
             dev_pay,
         } => {
             // The dev payer is the taker's own node, on the same network.
-            let dev_pay = dev_pay.then(|| LnCli::new(compose, "taker", &network));
+            let dev_pay = dev_pay
+                .then(|| {
+                    LnCli::from_config(
+                        lnd_rpc.as_deref(),
+                        lnd_dir.as_deref(),
+                        compose,
+                        "taker",
+                        &network,
+                    )
+                })
+                .transpose()
+                .map_err(|e| format!("{e} (needed for --dev-pay)"))?;
             let service = Service {
                 maker_url,
                 relay_url,

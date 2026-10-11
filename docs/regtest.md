@@ -64,10 +64,26 @@ a relay only to observe and broadcast:
 ./scripts/regtest-wasm.sh
 ```
 
-All four scripts source `scripts/lib.sh`, which builds the binaries once and
-needs `cargo` and `python3`; `regtest-wasm.sh` also needs `node` and the
-`wasm32-unknown-unknown` target. `regtest-maker.sh` and `regtest-wasm.sh` kill
-any daemon or relay left over from an earlier run before they start.
+To run the whole web flow over HTTP - quote, verify the deposit, pay, claim, and
+find the swap again by claim key:
+
+```bash
+./scripts/regtest-coordinator.sh
+```
+
+To run recovery: a taker that loses the page and comes back, a deadline counted
+down to the block, and a maker that refunds a deposit it was already paid for:
+
+```bash
+./scripts/regtest-recovery.sh
+```
+
+All six scripts source `scripts/lib.sh`, which builds the binaries once and
+needs `cargo`, `python3` and a running compose stack; `regtest-wasm.sh`,
+`regtest-coordinator.sh` and `regtest-recovery.sh` also need `node` and the
+`wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`).
+The daemon and service scripts kill anything left over from an earlier run
+before they start.
 
 Each swap moves real balance from the taker to the maker over Lightning, so a
 long series of runs drains the taker's outbound capacity. The scripts refuse to
@@ -203,6 +219,84 @@ anyone: the maker's own records cannot see a refund the maker did not build.
   distinctive such as `relay --listen 127.0.0.1:3100`.
 - A `set -e` trap that cleans up processes needs `|| true` on each `pkill`, or
   the trap aborts with a non-zero status of its own.
-- The coordinator and frontend are still absent from the compose file: both take
-  host paths (`--web`, `--wasm`, `--dir`) that only make sense from the
-  repository root.
+- Both nodes run as root and take their data directory from `/etc/passwd`, not
+  from `$HOME`: bitcoind goes to `/root/.bitcoin` and LND to `/root/.lnd`. The
+  volumes are mounted at those paths. Mounting them where the images' READMEs
+  suggest leaves an empty volume and a chain that dies with the container, which
+  is what this file used to do - `down` and `down -v` were indistinguishable.
+- The LND image's entrypoint creates a user and drops privileges. Anything built
+  on that image has to set its own `entrypoint` to skip it, or it cannot read the
+  admin macaroon.
+
+## The whole scenario in containers
+
+`./scripts/docker-web.sh` builds one image and runs the three nodes plus the four
+services. It funds the network if it is new, waits for the page to answer, and
+prints the two URLs:
+
+| What          | Where                    | Serves                                  |
+| ------------- | ------------------------ | --------------------------------------- |
+| taker page    | <http://127.0.0.1:8095/> | the page a user swaps from               |
+| control panel | <http://127.0.0.1:8091/> | height, mining, balances, swap states    |
+| relay         | <http://127.0.0.1:3110/> | what the browser reads the chain through |
+
+The services are behind a compose **profile**, so `docker compose up -d` still
+brings up only the three nodes and the `regtest-*.sh` scripts keep working. They
+want ports 3100/3200/8090, which is why the containerised ones use 3110/8095/8091
+and the two can run at once.
+
+```bash
+./scripts/docker-web.sh                                   # build, start, report
+docker compose -f docker/docker-compose.yml --profile web logs -f coordinator
+docker compose -f docker/docker-compose.yml --profile web down      # keeps state
+docker compose -f docker/docker-compose.yml --profile web down -v   # wipes it
+```
+
+### The control panel
+
+`regtestd` is a separate binary on purpose: it mines blocks and reads node
+wallets, and the coordinator must never be able to do either. It is the fastest
+way to drive a swap by hand, because the alternative is shelling into a container
+to mine a block.
+
+```text
+GET  /status        height, wallet balance, per-node capacity, the maker's swaps
+POST /mine          {"blocks": N}, capped at 200
+```
+
+It reports each section independently, so a dead node shows an error in its own
+card rather than blanking the page. Its node cards turn red when a node has no
+spendable outbound: a channel can be up and still unable to pay, and the payment
+failure says nothing about why.
+
+### How the services reach Lightning
+
+On a host, `lncli` is exec'd inside the compose container, which needs docker and
+nothing else. In a container there is no docker, so the services run `lncli`
+directly against the node's gRPC port, naming the credentials rather than relying
+on a home directory to find them:
+
+```bash
+maker serve --lnd-rpc lnd-maker:10009 --lnd-dir /lnd-maker
+```
+
+`--lnd-dir` holds `tls.cert` and `data/chain/bitcoin/<network>/admin.macaroon`.
+The node's volume is mounted read-only at that path, because writing to a node's
+data directory is not the maker's business. Setting one of the two without the
+other is an error rather than a fallback, because the fallback fails with a
+message about docker that has nothing to do with the mistake.
+
+Reaching a node by name needs the certificate to vouch for the name, so both
+nodes run with `--tlsextradomain=lnd-maker` / `=lnd-taker`.
+
+### Building it
+
+The image is one Rust build stage and one runtime stage. Two things about it are
+worth knowing before changing it:
+
+- The runtime base is the node's own image, not a slim Debian, because three of
+  the four services shell out to `lncli` and that binary does not survive being
+  copied across distributions.
+- The wasm build needs `clang`: `cc-rs` compiles secp256k1's C sources for
+  `wasm32-unknown-unknown`, and without it the failure surfaces from inside a
+  dependency as `cc-rs: failed to find tool "clang"`.
