@@ -1,8 +1,8 @@
 // The regtest control panel.
 //
-// Dev only. Everything it shows comes from one `/status` call, and the only
-// thing it does is mine blocks - the action a swap test needs most, and the one
-// nothing else should be allowed to do.
+// Dev only. Everything it shows comes from one `/status` call; the only things
+// it does are mine blocks and drive the taker's node as a wallet, because a swap
+// needs both and shelling into a container to do either is the alternative.
 
 const $ = (id) => document.getElementById(id);
 const sats = (n) => `${Number(n).toLocaleString()} sat`;
@@ -12,17 +12,21 @@ const short = (text, head = 10, tail = 6) =>
 /** A deadline this close is worth showing in red. Matches URGENT_BLOCKS. */
 const URGENT_BLOCKS = 12;
 
+const when = (seconds) =>
+  seconds > 0 ? new Date(seconds * 1000).toLocaleTimeString() : "-";
+
 async function api(path, body) {
-  const options =
+  const response = await fetch(
+    path,
     body === undefined
       ? {}
       : {
           method: "POST",
           headers: { "Content-Type": "text/plain" },
           body: typeof body === "string" ? body : JSON.stringify(body),
-        };
+        },
+  );
 
-  const response = await fetch(path, options);
   const payload = await response.json();
   if (!response.ok) {
     throw new Error(payload.error ?? `HTTP ${response.status}`);
@@ -63,6 +67,7 @@ function nodeCard(role, node) {
         <dt>can send</dt><dd>${sats(node.outbound_sat)}</dd>
         <dt>can receive</dt><dd>${sats(node.inbound_sat)}</dd>
         <dt>channels</dt><dd>${node.channels}</dd>
+        <dt>on chain</dt><dd>${sats(node.wallet_sat)}</dd>
       </dl>
       ${
         starved
@@ -71,6 +76,30 @@ function nodeCard(role, node) {
           : ""
       }
     </article>`;
+}
+
+function historyTable(history) {
+  if (history.error) return `<p class="error">${history.error}</p>`;
+  if (history.length === 0) return `<p class="quote">nothing yet</p>`;
+
+  const rows = history
+    .map(
+      (entry) => `<tr>
+        <td>${entry.direction}</td>
+        <td>${sats(entry.sats)}</td>
+        <td>${entry.state.toLowerCase()}</td>
+        <td><code>${short(entry.hash, 8, 4)}</code></td>
+        <td>${when(entry.at)}</td>
+      </tr>`,
+    )
+    .join("");
+
+  return `<table>
+    <thead>
+      <tr><th></th><th>amount</th><th>state</th><th>hash</th><th>at</th></tr>
+    </thead>
+    <tbody>${rows}</tbody>
+  </table>`;
 }
 
 function swapTable(swaps, height) {
@@ -111,27 +140,27 @@ function swapTable(swaps, height) {
   </table>`;
 }
 
-let lastMarkup = "";
+// Only touch the DOM when something changed: this polls, and a repaint every
+// couple of seconds is enough to take the cursor out of a field being typed in.
+const painted = {};
+
+function paint(id, markup) {
+  if (painted[id] === markup) return;
+  painted[id] = markup;
+  $(id).innerHTML = markup;
+}
 
 function render(status) {
   const height = typeof status.height === "number" ? status.height : null;
 
-  const markup = [
+  paint(
+    "nodes",
     Object.entries(status.nodes)
       .map(([role, node]) => nodeCard(role, node))
       .join(""),
-    swapTable(status.swaps, height),
-  ].join("");
-
-  // Only touch the DOM when something changed: this polls, and a repaint every
-  // couple of seconds is enough to make the buttons feel unreliable.
-  if (markup !== lastMarkup) {
-    lastMarkup = markup;
-    $("nodes").innerHTML = Object.entries(status.nodes)
-      .map(([role, node]) => nodeCard(role, node))
-      .join("");
-    $("swaps").innerHTML = swapTable(status.swaps, height);
-  }
+  );
+  paint("history", historyTable(status.history));
+  paint("swaps", swapTable(status.swaps, height));
 
   $("chain").textContent = chainLine(status);
   $("foot").textContent = status.taker_url
@@ -162,6 +191,74 @@ async function mine(blocks) {
   }
 }
 
+async function makeInvoice() {
+  $("make-invoice").disabled = true;
+  try {
+    const { bolt11 } = await api("/taker/invoice", {
+      sats: Number($("inv-amt").value),
+      memo: $("inv-memo").value,
+    });
+    $("bolt11").textContent = bolt11;
+    $("bolt11").hidden = false;
+    $("node-note").textContent = "invoice ready: pay it with anything on this network";
+  } catch (error) {
+    $("node-note").textContent = `could not make an invoice: ${error.message}`;
+  } finally {
+    $("make-invoice").disabled = false;
+    await refresh();
+  }
+}
+
+async function payInvoice() {
+  $("pay-invoice").disabled = true;
+  $("node-note").textContent = "paying…";
+  try {
+    const { preimage } = await api("/taker/pay", { bolt11: $("pay-req").value.trim() });
+    $("node-note").textContent = `paid, preimage ${short(preimage, 16, 8)}`;
+    $("pay-req").value = "";
+  } catch (error) {
+    $("node-note").textContent = `payment failed: ${error.message}`;
+  } finally {
+    $("pay-invoice").disabled = false;
+    await refresh();
+  }
+}
+
+async function makeAddress() {
+  $("make-address").disabled = true;
+  try {
+    // Deliberately a button and not a poll: the node returns a new address on
+    // every call, so asking twice a second would empty the keypool.
+    const { address } = await api("/taker/address", "");
+    $("address").textContent = address;
+    $("address").hidden = false;
+    $("node-note").textContent = "send on-chain coins to this address";
+  } catch (error) {
+    $("node-note").textContent = `could not get an address: ${error.message}`;
+  } finally {
+    $("make-address").disabled = false;
+    await refresh();
+  }
+}
+
+async function sendCoins() {
+  $("send-coins").disabled = true;
+  $("node-note").textContent = "sending…";
+  try {
+    const { txid } = await api("/taker/send", {
+      address: $("send-addr").value.trim(),
+      sats: Number($("send-amt").value),
+    });
+    $("node-note").textContent = `sent on chain, tx ${short(txid, 16, 8)}`;
+    $("send-addr").value = "";
+  } catch (error) {
+    $("node-note").textContent = `send failed: ${error.message}`;
+  } finally {
+    $("send-coins").disabled = false;
+    await refresh();
+  }
+}
+
 // --- wiring ----------------------------------------------------------------
 
 $("mine").addEventListener("click", () => mine(Number($("blocks").value)));
@@ -173,6 +270,11 @@ $("blocks").addEventListener("keydown", (event) => {
 for (const button of document.querySelectorAll("button[data-mine]")) {
   button.addEventListener("click", () => mine(Number(button.dataset.mine)));
 }
+
+$("make-invoice").addEventListener("click", makeInvoice);
+$("pay-invoice").addEventListener("click", payInvoice);
+$("make-address").addEventListener("click", makeAddress);
+$("send-coins").addEventListener("click", sendCoins);
 
 await refresh();
 setInterval(refresh, 2000);

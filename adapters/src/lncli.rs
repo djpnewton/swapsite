@@ -148,6 +148,64 @@ impl LnCli {
     pub fn capacity(&self) -> Result<Capacity, LightningError> {
         Capacity::from_lnd(&self.run(&["listchannels"])?)
     }
+
+    /// The node's on-chain wallet balance, in satoshis.
+    pub fn wallet_balance(&self) -> Result<u64, LightningError> {
+        Ok(sat(
+            parse(&self.run(&["walletbalance"])?)?.get("total_balance")
+        ))
+    }
+
+    /// Payments this node has sent, newest first.
+    pub fn sent(&self) -> Result<Vec<Entry>, LightningError> {
+        Entry::sent_from_lnd(&self.run(&[
+            "listpayments",
+            "--include_incomplete",
+            "--max_payments",
+            "25",
+        ])?)
+    }
+
+    /// Invoices this node has issued, paid or not.
+    pub fn received(&self) -> Result<Vec<Entry>, LightningError> {
+        Entry::received_from_lnd(&self.run(&["listinvoices", "--max_invoices", "25"])?)
+    }
+
+    /// A fresh on-chain address belonging to this node.
+    ///
+    /// Fresh every call, so this belongs behind a button and not behind a poll:
+    /// a page that asked twice a second would burn an address each time.
+    pub fn new_address(&self) -> Result<String, LightningError> {
+        only_field(&self.run(&["newaddress", "p2wkh"])?, "address")
+    }
+
+    /// Send on-chain coins out of this node's wallet.
+    ///
+    /// The fee is fixed rather than estimated: this is regtest, where a satoshi
+    /// per vbyte always confirms, and an estimator that changes its mind between
+    /// two identical calls is worse than a constant.
+    pub fn send_onchain(&self, address: &str, sats: u64) -> Result<String, LightningError> {
+        only_field(
+            &self.run(&[
+                "sendcoins",
+                "--addr",
+                address,
+                "--amt",
+                &sats.to_string(),
+                "--sat_per_vbyte",
+                "1",
+            ])?,
+            "txid",
+        )
+    }
+
+    /// Create an invoice and return the bolt11 to pay it.
+    pub fn add_invoice(&self, sats: u64, memo: &str) -> Result<String, LightningError> {
+        only_field(
+            &self.run(&["addinvoice", "--amt", &sats.to_string(), "--memo", memo])?,
+            "payment_request",
+        )
+    }
 }
 
 /// How much a node can send and receive over its channels.
@@ -196,12 +254,111 @@ impl Capacity {
     }
 }
 
+fn parse(json: &str) -> Result<Value, LightningError> {
+    serde_json::from_str(json).map_err(|e| LightningError::Output(e.to_string()))
+}
+
+fn entries(list: Option<&Value>) -> impl Iterator<Item = &Value> {
+    list.and_then(Value::as_array).into_iter().flatten()
+}
+
+fn text(value: Option<&Value>) -> String {
+    value.and_then(Value::as_str).unwrap_or_default().to_owned()
+}
+
+/// Seconds since the epoch, from a string or a number.
+fn secs(value: Option<&Value>) -> i64 {
+    match value {
+        Some(Value::String(text)) => text.parse().unwrap_or(0),
+        Some(Value::Number(number)) => number.as_i64().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// An invoice carries both a `state` and, on older output, only a `settled` bool.
+fn invoice_state(invoice: &Value) -> String {
+    let reported = text(invoice.get("state"));
+    if !reported.is_empty() {
+        return reported;
+    }
+    match invoice.get("settled").and_then(Value::as_bool) {
+        Some(true) => "SETTLED".to_owned(),
+        _ => "OPEN".to_owned(),
+    }
+}
+
+/// Pull one string field out of a node response, and say which one is missing.
+///
+/// Every command here answers with a single field, and a missing one means this
+/// crate's idea of the node's output is wrong rather than the node being odd, so
+/// naming the field is the useful part of the error.
+fn only_field(json: &str, key: &str) -> Result<String, LightningError> {
+    parse(json)?
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| LightningError::Output(format!("the node returned no `{key}`")))
+}
+
 /// LND reports satoshi amounts as strings, and occasionally as numbers.
 fn sat(value: Option<&Value>) -> u64 {
     match value {
         Some(Value::String(text)) => text.parse().unwrap_or(0),
         Some(Value::Number(number)) => number.as_u64().unwrap_or(0),
         _ => 0,
+    }
+}
+
+/// Which way value moved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Direction {
+    Sent,
+    Received,
+}
+
+/// One line of a node's history, from either direction.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Entry {
+    pub direction: Direction,
+    pub sats: u64,
+    /// The state the node reports: `SUCCEEDED`, `IN_FLIGHT`, `SETTLED`, `OPEN`.
+    pub state: String,
+    /// Unix seconds, or zero when the node did not say.
+    pub at: i64,
+    /// Payment hash, so a line can be matched against a swap.
+    pub hash: String,
+}
+
+impl Entry {
+    /// Read `listpayments` output.
+    pub fn sent_from_lnd(json: &str) -> Result<Vec<Self>, LightningError> {
+        let value = parse(json)?;
+        Ok(entries(value.get("payments"))
+            .map(|payment| Self {
+                direction: Direction::Sent,
+                // Both spellings appear across versions; the tie is not close.
+                sats: sat(payment.get("value_sat")).max(sat(payment.get("value"))),
+                state: text(payment.get("status")),
+                at: secs(payment.get("creation_date")),
+                hash: text(payment.get("payment_hash")),
+            })
+            .collect())
+    }
+
+    /// Read `listinvoices` output.
+    pub fn received_from_lnd(json: &str) -> Result<Vec<Self>, LightningError> {
+        let value = parse(json)?;
+        Ok(entries(value.get("invoices"))
+            .map(|invoice| Self {
+                direction: Direction::Received,
+                // `amt_paid_sat` is what arrived; `value` is what was asked for,
+                // which is what to show while it is still unpaid.
+                sats: sat(invoice.get("amt_paid_sat")).max(sat(invoice.get("value"))),
+                state: invoice_state(invoice),
+                at: secs(invoice.get("settle_date")).max(secs(invoice.get("creation_date"))),
+                hash: text(invoice.get("r_hash")),
+            })
+            .collect())
     }
 }
 
@@ -447,5 +604,112 @@ mod tests {
         let capacity = Capacity::from_lnd(listed).unwrap();
         assert_eq!(capacity.outbound_sat, 100_000);
         assert_eq!(capacity.inbound_sat, 200_000);
+    }
+
+    #[test]
+    fn a_sent_payment_reads_its_amount_and_state() {
+        // Field names and string amounts are copied from a real `listpayments`
+        // on LND 0.18.3, because guessing these is how a ledger quietly reads 0.
+        let listed = r#"{"payments": [
+            {"payment_hash": "194ceb2a", "value": "30030", "value_sat": "30030",
+             "status": "SUCCEEDED", "creation_date": "1791733750"},
+            {"payment_hash": "aa", "value_sat": "5000", "status": "IN_FLIGHT"}
+        ]}"#;
+
+        let entries = Entry::sent_from_lnd(listed).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].direction, Direction::Sent);
+        assert_eq!(entries[0].sats, 30_030);
+        assert_eq!(entries[0].state, "SUCCEEDED");
+        assert_eq!(entries[0].at, 1_791_733_750);
+        assert_eq!(entries[0].hash, "194ceb2a");
+        // A line with no date is still a line.
+        assert_eq!(entries[1].at, 0);
+        assert_eq!(entries[1].sats, 5_000);
+    }
+
+    #[test]
+    fn an_unpaid_invoice_shows_what_was_asked_for() {
+        let listed = r#"{"invoices": [
+            {"r_hash": "64809008", "value": "1234", "amt_paid_sat": "0",
+             "settled": false, "creation_date": "1791735327", "settle_date": "0"}
+        ]}"#;
+
+        let entries = Entry::received_from_lnd(listed).unwrap();
+        assert_eq!(entries[0].direction, Direction::Received);
+        assert_eq!(entries[0].sats, 1_234);
+        assert_eq!(entries[0].state, "OPEN");
+        assert_eq!(entries[0].at, 1_791_735_327);
+    }
+
+    #[test]
+    fn a_paid_invoice_reports_what_arrived_and_when() {
+        let listed = r#"{"invoices": [
+            {"r_hash": "beef", "value": "1000", "amt_paid_sat": "1000",
+             "state": "SETTLED", "creation_date": "1791735327", "settle_date": "1791735400"}
+        ]}"#;
+
+        let entries = Entry::received_from_lnd(listed).unwrap();
+        assert_eq!(entries[0].state, "SETTLED");
+        // Settlement time, not creation time: that is when the money moved.
+        assert_eq!(entries[0].at, 1_791_735_400);
+    }
+
+    #[test]
+    fn an_empty_ledger_is_empty_rather_than_an_error() {
+        for listed in ["{}", r#"{"payments": []}"#, r#"{"invoices": []}"#] {
+            assert!(Entry::sent_from_lnd(listed).unwrap().is_empty());
+            assert!(Entry::received_from_lnd(listed).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn ledger_output_that_is_not_json_is_an_error() {
+        assert!(Entry::sent_from_lnd("not json").is_err());
+        assert!(Entry::received_from_lnd("").is_err());
+    }
+
+    #[test]
+    fn a_command_answer_yields_its_one_field() {
+        assert_eq!(
+            only_field(
+                r#"{"address": "bcrt1qmxzyy4p23u8ndpyv7e00v4jhpld2d0h75g3y9j"}"#,
+                "address"
+            )
+            .unwrap(),
+            "bcrt1qmxzyy4p23u8ndpyv7e00v4jhpld2d0h75g3y9j"
+        );
+        assert_eq!(
+            only_field(
+                r#"{"txid": "30401017e809f063f81994c7009b71fc8abc96e9"}"#,
+                "txid"
+            )
+            .unwrap(),
+            "30401017e809f063f81994c7009b71fc8abc96e9"
+        );
+    }
+
+    #[test]
+    fn a_missing_field_names_itself_in_the_error() {
+        // The message is the whole value of the helper: it is the difference
+        // between "the node said something odd" and which field to go and look
+        // at.
+        for (json, key) in [
+            (r#"{}"#, "address"),
+            (r#"{"address": null}"#, "address"),
+            (r#"{"address": 1234}"#, "address"),
+            (r#"{"address": "bcrt1q"}"#, "txid"),
+        ] {
+            let error = only_field(json, key).unwrap_err().to_string();
+            assert!(error.contains(key), "{json} {key}: {error}");
+        }
+    }
+
+    #[test]
+    fn output_that_is_not_json_cannot_name_a_field() {
+        // Distinct from the above on purpose: there is nothing to name, and
+        // pretending otherwise would be a worse message than the parse error.
+        let error = only_field("not json", "txid").unwrap_err().to_string();
+        assert!(error.contains("parse"), "{error}");
     }
 }

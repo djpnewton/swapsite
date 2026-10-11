@@ -54,8 +54,9 @@ the coordinator and a regtest control panel:
 ```
 
 - taker page: <http://127.0.0.1:8095/>
-- control panel: <http://127.0.0.1:8091/> (mine blocks, see heights, balances,
-  channel capacity and swap states)
+- control panel: <http://127.0.0.1:8091/> (mine blocks; heights, balances, channel
+  capacity and swap states; and the taker's node as a wallet - its history, make an
+  invoice, pay one, receive on-chain and send back out)
 - relay: <http://127.0.0.1:3110/>
 
 The services are behind a compose profile, so `docker compose up -d` still gives

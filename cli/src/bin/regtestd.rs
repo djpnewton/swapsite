@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use swapsite_adapters::{
     http::{serve, Request, Response},
+    lncli::{Direction, Entry},
     store::SwapStore,
     BitcoinRpc, LnCli,
 };
@@ -139,6 +140,25 @@ fn route(cli: &Cli, request: &Request) -> Response {
         return mine(cli, request);
     }
 
+    // The taker's node, as a wallet: the two directions value can move.
+    if request.matches("POST", "/taker/invoice").is_some() {
+        return invoice(cli, request);
+    }
+
+    if request.matches("POST", "/taker/pay").is_some() {
+        return pay(cli, request);
+    }
+
+    // The same node's on-chain wallet, which is the other half of "receive" and
+    // "send".
+    if request.matches("POST", "/taker/address").is_some() {
+        return address(cli);
+    }
+
+    if request.matches("POST", "/taker/send").is_some() {
+        return send(cli, request);
+    }
+
     file(cli, &request.path)
 }
 
@@ -162,6 +182,7 @@ fn status(cli: &Cli) -> Value {
             "taker": node_status(cli, "taker"),
         },
         "swaps": swaps(cli),
+        "history": history(cli),
         "taker_url": cli.taker_url,
     })
 }
@@ -177,6 +198,7 @@ fn node_status(cli: &Cli, role: &str) -> Value {
             "outbound_sat": capacity.outbound_sat,
             "inbound_sat": capacity.inbound_sat,
             "channels": capacity.channels,
+            "wallet_sat": node.wallet_balance()?,
         }))
     })
 }
@@ -200,6 +222,138 @@ fn swaps(cli: &Cli) -> Value {
             .collect();
         Ok(json!(listed))
     })
+}
+
+/// The taker node's history, both directions, newest first.
+///
+/// Sent and received come from two different commands, so the panel merges them
+/// rather than making the page do it.
+fn history(cli: &Cli) -> Value {
+    section(|| {
+        let node = cli.node("taker")?;
+        let mut entries = node.sent()?;
+        entries.extend(node.received()?);
+        entries.sort_by_key(|entry| -entry.at);
+
+        Ok(json!(entries
+            .iter()
+            .map(entry_json)
+            .collect::<Vec<Value>>()))
+    })
+}
+
+fn entry_json(entry: &Entry) -> Value {
+    json!({
+        "direction": match entry.direction {
+            Direction::Sent => "sent",
+            Direction::Received => "received",
+        },
+        "sats": entry.sats,
+        "state": entry.state,
+        "at": entry.at,
+        "hash": entry.hash,
+    })
+}
+
+#[derive(Deserialize)]
+struct Ask {
+    sats: u64,
+    #[serde(default)]
+    memo: String,
+}
+
+/// Receive: make an invoice on the taker's node.
+fn invoice(cli: &Cli, request: &Request) -> Response {
+    let ask: Ask = match serde_json::from_str(&request.body) {
+        Ok(ask) => ask,
+        Err(e) => return Response::error(400, format!("bad request: {e}")),
+    };
+
+    if ask.sats == 0 {
+        return Response::error(400, "an invoice needs a positive amount");
+    }
+
+    let memo = if ask.memo.trim().is_empty() {
+        "regtest panel"
+    } else {
+        ask.memo.trim()
+    };
+
+    match cli
+        .node("taker")
+        .and_then(|node| Ok(node.add_invoice(ask.sats, memo)?))
+    {
+        Ok(bolt11) => Response::json(200, &json!({ "bolt11": bolt11 })),
+        Err(e) => Response::error(502, e.to_string()),
+    }
+}
+
+/// A fresh on-chain address on the taker's node.
+///
+/// Deliberately not part of `/status`: the node hands out a new address on every
+/// call, so polling for one would burn through the keypool.
+fn address(cli: &Cli) -> Response {
+    match cli.node("taker").and_then(|node| Ok(node.new_address()?)) {
+        Ok(address) => Response::json(200, &json!({ "address": address })),
+        Err(e) => Response::error(502, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct Funds {
+    address: String,
+    sats: u64,
+}
+
+/// Spend from the taker node's on-chain wallet.
+fn send(cli: &Cli, request: &Request) -> Response {
+    let funds: Funds = match serde_json::from_str(&request.body) {
+        Ok(funds) => funds,
+        Err(e) => return Response::error(400, format!("bad request: {e}")),
+    };
+
+    let address = funds.address.trim();
+    if address.is_empty() {
+        return Response::error(400, "nowhere to send it");
+    }
+    if funds.sats == 0 {
+        return Response::error(400, "nothing to send");
+    }
+
+    match cli
+        .node("taker")
+        .and_then(|node| Ok(node.send_onchain(address, funds.sats)?))
+    {
+        Ok(txid) => Response::json(200, &json!({ "txid": txid })),
+        Err(e) => Response::error(502, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct Owe {
+    bolt11: String,
+}
+
+/// Send: pay an invoice from the taker's node.
+fn pay(cli: &Cli, request: &Request) -> Response {
+    let owe: Owe = match serde_json::from_str(&request.body) {
+        Ok(owe) => owe,
+        Err(e) => return Response::error(400, format!("bad request: {e}")),
+    };
+
+    let bolt11 = owe.bolt11.trim();
+    if bolt11.is_empty() {
+        return Response::error(400, "nothing to pay");
+    }
+
+    match cli.node("taker").and_then(|node| {
+        // Blocks until the payment settles or gives up, which is the point: the
+        // caller wants the outcome, not an in-flight hash.
+        Ok(LightningNode::pay(&node, bolt11)?)
+    }) {
+        Ok(preimage) => Response::json(200, &json!({ "preimage": preimage.to_hex() })),
+        Err(e) => Response::error(502, e.to_string()),
+    }
 }
 
 /// Run a piece of the status and turn either outcome into JSON.
@@ -376,6 +530,95 @@ mod tests {
             request.body = body.to_owned();
             assert_eq!(route(&cli(), &request).status, 400, "allowed {body}");
         }
+    }
+
+    fn post(path: &str, body: &str) -> Request {
+        let mut request = get(path);
+        request.method = "POST".to_owned();
+        request.body = body.to_owned();
+        request
+    }
+
+    #[test]
+    fn an_invoice_needs_an_amount() {
+        // Zero is refused before the node is called: an invoice for nothing is
+        // never what was meant.
+        let response = route(&cli(), &post("/taker/invoice", r#"{"sats": 0}"#));
+        assert_eq!(response.status, 400);
+    }
+
+    #[test]
+    fn a_malformed_request_does_not_reach_the_node() {
+        for (path, body) in [
+            ("/taker/invoice", "not json"),
+            ("/taker/invoice", r#"{"sats": "lots"}"#),
+            ("/taker/pay", "not json"),
+        ] {
+            assert_eq!(
+                route(&cli(), &post(path, body)).status,
+                400,
+                "{path} {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn there_has_to_be_something_to_pay() {
+        for body in [r#"{"bolt11": ""}"#, r#"{"bolt11": "   "}"#] {
+            assert_eq!(
+                route(&cli(), &post("/taker/pay", body)).status,
+                400,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_the_node_cannot_answer_is_a_node_error_not_a_bad_request() {
+        // The distinction matters when reading the panel: 400 means the page
+        // sent nonsense, 502 means the node is not there.
+        for (path, body) in [
+            ("/taker/invoice", r#"{"sats": 1000}"#),
+            ("/taker/pay", r#"{"bolt11": "lnbcrt1..."}"#),
+        ] {
+            assert_eq!(route(&cli(), &post(path, body)).status, 502, "{path}");
+        }
+    }
+
+    #[test]
+    fn an_on_chain_send_needs_somewhere_and_something() {
+        for body in [
+            r#"{"address": "", "sats": 1000}"#,
+            r#"{"address": "   ", "sats": 1000}"#,
+            r#"{"address": "bcrt1q", "sats": 0}"#,
+        ] {
+            assert_eq!(
+                route(&cli(), &post("/taker/send", body)).status,
+                400,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_node_that_cannot_answer_is_a_node_error_for_the_address_routes_too() {
+        assert_eq!(route(&cli(), &post("/taker/address", "")).status, 502);
+        assert_eq!(
+            route(
+                &cli(),
+                &post("/taker/send", r#"{"address": "bcrt1qabc", "sats": 1000}"#)
+            )
+            .status,
+            502
+        );
+    }
+
+    #[test]
+    fn the_status_carries_the_taker_history_section() {
+        // No node answers in these tests, so the section reports its own error
+        // rather than blanking the panel.
+        let value = status(&cli());
+        assert!(value.get("history").is_some());
     }
 
     #[test]

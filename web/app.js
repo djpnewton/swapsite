@@ -324,6 +324,14 @@ function card(id, entry) {
   // invite a transaction that is guaranteed to be rejected.
   const gone = recovery?.action.kind === "gone";
 
+  // The invoice, shown whether or not this page can pay it. Paying from another
+  // wallet is the real flow; the dev shortcut is only a shortcut.
+  const invoice =
+    !preimage && swap.bolt11
+      ? `<p class="quote">Pay this invoice, from any wallet on this network:</p>
+         <pre class="bolt11">${swap.bolt11}</pre>`
+      : "";
+
   const actions = [];
   if (!gone) {
     if (!verified) {
@@ -336,6 +344,14 @@ function card(id, entry) {
         `<button data-act="pay" data-id="${id}" class="primary" ${busy ? "disabled" : ""}>Pay ${sats(
           swap.invoice_sat,
         )}</button>`,
+      );
+      // An inline field rather than a modal prompt: a prompt is unstylable, and
+      // some hosts do not implement it at all, which makes the only route to a
+      // swap paid from another wallet unusable.
+      actions.push(
+        `<input data-preimage="${id}" placeholder="preimage, if you paid elsewhere" value="${
+          entry.typedPreimage ?? ""
+        }" />`,
       );
       actions.push(`<button data-act="paste" data-id="${id}">I paid elsewhere</button>`);
     } else if (!claimed) {
@@ -361,6 +377,7 @@ function card(id, entry) {
       <dl>${rows.join("")}</dl>
       <div class="actions">${actions.join("")}</div>
       ${busy ? `<p class="quote">${busy}…</p>` : ""}
+      ${invoice}
       ${notice(recovery)}
       ${
         claimed
@@ -431,19 +448,24 @@ $("swaps").addEventListener("click", async (event) => {
     case "claim":
       return claim(id);
     case "paste": {
-      const preimage = window.prompt("Paste the preimage your wallet gave you");
-      if (preimage) update(id, { preimage: preimage.trim(), error: null });
+      const typed = (session.swaps[id].typedPreimage ?? "").trim();
+      if (!typed) {
+        update(id, { error: "paste the preimage your wallet gave you first" });
+        return;
+      }
+      update(id, { preimage: typed, error: null });
       return;
     }
   }
 });
 
 $("swaps").addEventListener("input", (event) => {
-  const id = event.target.dataset.addr;
-  if (id) {
-    session.swaps[id].address = event.target.value;
-    persist();
-  }
+  const { addr, preimage } = event.target.dataset;
+
+  // Held in the session so a reload does not lose a paste in progress.
+  if (addr) session.swaps[addr].address = event.target.value;
+  if (preimage) session.swaps[preimage].typedPreimage = event.target.value;
+  if (addr || preimage) persist();
 });
 
 // Recover after a reload: everything this key has going, straight from the

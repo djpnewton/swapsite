@@ -260,14 +260,53 @@ way to drive a swap by hand, because the alternative is shelling into a containe
 to mine a block.
 
 ```text
-GET  /status        height, wallet balance, per-node capacity, the maker's swaps
-POST /mine          {"blocks": N}, capped at 200
+GET  /status           height, balances, per-node capacity, the maker's swaps
+POST /mine             {"blocks": N}, capped at 200
+POST /taker/invoice    {"sats": N, "memo": "..."}  -> {"bolt11"}
+POST /taker/pay        {"bolt11": "..."}           -> {"preimage"}
+POST /taker/address    {}                          -> {"address"}
+POST /taker/send       {"address": "...", "sats": N} -> {"txid"}
 ```
+
+The two `address`/`send` routes are absent from `/status` on purpose. `lncli
+newaddress` returns a **fresh** address every time it is called, so an address
+behind a two-second poll would be a new one every two seconds. The address is
+handed out when asked and the request is the only thing that asks.
 
 It reports each section independently, so a dead node shows an error in its own
 card rather than blanking the page. Its node cards turn red when a node has no
 spendable outbound: a channel can be up and still unable to pay, and the payment
 failure says nothing about why.
+
+The taker's node gets a wallet view: its on-chain balance, its channel capacity,
+both directions of its history (sent payments and received invoices, merged and
+newest first), and the two things a wallet does - make an invoice, pay one. The
+**On chain** section adds the other half: get an address to send coins to, or
+send coins out. Lightning alone is not enough to drive the node here, because
+funding a channel and paying a swap's deposit are both on-chain moves. That is
+the dev stand-in for the user's wallet, and it is what makes the real payment
+route testable without `--dev-pay`.
+
+### Paying a swap from the panel
+
+This is the flow the invoice display exists for, and it is worth walking once
+because it exercises three things at the same time:
+
+1. On the taker page, **Get a quote**. The card now shows the bolt11 to pay.
+2. Paste that into the panel and **Pay**. The payment is held, not settled: the
+   maker will not settle until the deposit has a confirmation.
+3. **Mine a block** in the panel. The maker settles on its next tick, the panel
+   shows the preimage, and the swap reads `settled`.
+4. The taker page has been saying `find_preimage` since step 3 - it has no
+   preimage, because it never paid. Paste the one the panel showed, and it
+   claims.
+
+Step 4 is the honest consequence of paying from outside the page: the page cannot
+know a preimage it was never told. It is also the one clumsy step, and the fix is
+a protocol question rather than a UI one - a maker could hand over the preimage of
+a swap it has already settled, since by then the preimage is public anyway. That
+would remove the copy-paste, and it means widening the maker's public API, so it
+is not done yet.
 
 ### How the services reach Lightning
 

@@ -180,6 +180,20 @@ dd {
   font-weight: 600;
 }
 
+/* A bolt11 is long and wants selecting whole, not scrolling through. */
+.bolt11 {
+  margin: 0.5rem 0 0;
+  padding: 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--dim);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
 .ok {
   color: var(--good);
   margin: 0.5rem 0 0;

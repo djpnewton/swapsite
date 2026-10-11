@@ -37,3 +37,36 @@ code {
   font-family: ui-monospace, "SF Mono", "Cascadia Mono", monospace;
   font-size: 0.85rem;
 }
+
+/* The panel's own bits, on top of the page's stylesheet. */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+th {
+  color: var(--dim);
+  font-weight: 500;
+}
+
+td.gone {
+  color: var(--dim);
+}
+
+td.close {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.row input[type="text"] {
+  flex: 1;
+}

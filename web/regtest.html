@@ -39,6 +39,59 @@
       </section>
 
       <section class="card">
+        <h2>The taker's node</h2>
+        <p class="quote">
+          A stand-in for the user's wallet. In production the page pays through
+          WebLN and this node does not exist, but here it is what pays for a
+          swap.
+        </p>
+
+        <div class="row">
+          <label for="inv-amt">Invoice for</label>
+          <input id="inv-amt" type="number" min="1" step="1000" value="50000" />
+          <input id="inv-memo" type="text" placeholder="memo" />
+        </div>
+        <div class="actions">
+          <button id="make-invoice">Make an invoice</button>
+        </div>
+
+        <div class="row">
+          <label for="pay-req">Pay an invoice</label>
+          <input id="pay-req" type="text" placeholder="lnbcrt…" />
+        </div>
+        <div class="actions">
+          <button id="pay-invoice" class="primary">Pay</button>
+        </div>
+
+        <pre class="bolt11" id="bolt11" hidden></pre>
+
+        <h2>On chain</h2>
+        <p class="quote">
+          The node's on-chain wallet: where its coins sit before they are put
+          into a channel. An address is only handed out when asked, because the
+          node returns a fresh one on every call.
+        </p>
+        <div class="actions">
+          <button id="make-address">Get an address</button>
+        </div>
+        <pre class="bolt11" id="address" hidden></pre>
+
+        <div class="row">
+          <label for="send-addr">Send to</label>
+          <input id="send-addr" type="text" placeholder="bcrt1…" />
+          <input id="send-amt" type="number" min="1" step="1000" value="100000" />
+        </div>
+        <div class="actions">
+          <button id="send-coins">Send</button>
+        </div>
+
+        <p class="quote" id="node-note"></p>
+
+        <h2>History</h2>
+        <div id="history"></div>
+      </section>
+
+      <section class="card">
         <h2>Swaps</h2>
         <div id="swaps"></div>
       </section>
