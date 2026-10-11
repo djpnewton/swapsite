@@ -1,0 +1,106 @@
+name: swapsite-regtest
+
+services:
+  bitcoind:
+    image: polarlightning/bitcoind:27.0
+    container_name: swapsite-bitcoind
+    entrypoint: ["bitcoind"]
+    command:
+      - -regtest
+      - -server
+      - -txindex=1
+      - -blockfilterindex=1
+      - -peerblockfilters=1
+      - -fallbackfee=0.00001
+      - -rpcuser=bitcoin
+      - -rpcpassword=bitcoin
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -zmqpubrawblock=tcp://0.0.0.0:28332
+      - -zmqpubrawtx=tcp://0.0.0.0:28333
+    ports:
+      - "18443:18443"
+      - "18444:18444"
+      - "28332:28332"
+      - "28333:28333"
+    volumes:
+      - bitcoind-data:/home/bitcoin/.bitcoin
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bitcoin-cli -regtest -rpcuser=bitcoin -rpcpassword=bitcoin getblockchaininfo >/dev/null",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+
+  lnd-maker:
+    image: polarlightning/lnd:0.18.3-beta
+    container_name: swapsite-lnd-maker
+    entrypoint: ["lnd"]
+    command:
+      - --noseedbackup
+      - --alias=maker
+      - --debuglevel=info
+      - --listen=0.0.0.0:9735
+      - --rpclisten=0.0.0.0:10009
+      - --restlisten=0.0.0.0:8080
+      - --accept-keysend
+      - --bitcoin.active
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind:18443
+      - --bitcoind.rpcuser=bitcoin
+      - --bitcoind.rpcpass=bitcoin
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+    volumes:
+      - lnd-maker-data:/home/lnd/.lnd
+    ports:
+      - "9735:9735"
+      - "10009:10009"
+      - "18080:8080"
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+
+  lnd-taker:
+    image: polarlightning/lnd:0.18.3-beta
+    container_name: swapsite-lnd-taker
+    entrypoint: ["lnd"]
+    command:
+      - --noseedbackup
+      - --alias=taker
+      - --debuglevel=info
+      - --listen=0.0.0.0:9735
+      - --rpclisten=0.0.0.0:10009
+      - --restlisten=0.0.0.0:8080
+      - --accept-keysend
+      - --bitcoin.active
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind:18443
+      - --bitcoind.rpcuser=bitcoin
+      - --bitcoind.rpcpass=bitcoin
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+    volumes:
+      - lnd-taker-data:/home/lnd/.lnd
+    ports:
+      - "9736:9735"
+      - "10010:10009"
+      - "18081:8080"
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+
+  # coordinator and frontend are added once there is code to run.
+  # They join this network and reach:
+  #   bitcoind  -> http://bitcoind:18443        (bitcoin / bitcoin)
+  #   lnd-maker -> https://lnd-maker:8080       (see docs/regtest.md)
+
+volumes:
+  bitcoind-data:
+  lnd-maker-data:
+  lnd-taker-data:
