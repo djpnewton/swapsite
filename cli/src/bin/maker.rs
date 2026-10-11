@@ -494,10 +494,23 @@ fn observe(
         None => 0,
     };
 
+    // A transaction stays confirmed after its output is spent, so
+    // `funding_confirmations` cannot answer this. The outpoint has to be asked
+    // about directly, or a refund this daemon did not build is invisible.
+    let deposit_spent = match record.funding {
+        Some(_) => {
+            let outpoint = record.funding_outpoint()?;
+            chain.outspent(&outpoint.txid, outpoint.vout)?.is_none()
+        }
+        // Nothing has been deposited, so there is nothing that could be gone.
+        None => false,
+    };
+
     Ok(Observed {
         height,
         funding_confirmations,
         refund_confirmations,
+        deposit_spent,
         invoice: lightning.invoice_state(&record.payment_hash)?,
     })
 }

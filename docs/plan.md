@@ -212,6 +212,12 @@ Registry of decisions:
   mid-swap must be able to finish or undo the swap from disk alone.
 - **Observed reality wins over the local record.** Recovery adopts terminal
   states seen on-chain or on Lightning, and can never adopt a non-terminal one.
+- **A signal the record cannot hold has to be read from the chain.** The maker's
+  refund state only ever describes the refund it built itself, and a
+  transaction stays confirmed after its output is spent, so the deposit's own
+  unspent status is observed separately. An unsettled invoice plus a spent
+  deposit is a refund, because a claim would have needed the preimage and the
+  preimage only comes from settling.
 - **The taker gets entropy from the page, not from the module.** `rand` is a
   feature of the domain crate, off in the wasm build, so the module imports
   nothing and needs no toolchain beyond `rustup target add wasm32-unknown-unknown`.

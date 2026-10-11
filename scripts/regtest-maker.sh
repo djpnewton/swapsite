@@ -149,5 +149,64 @@ STATE=$(await_swap_state "$ID2" refunded "$SWAPS") \
 echo "swap state:    $STATE"
 [ "$(confirmations "$REFUND_TXID")" -ge 1 ] || fail "refund did not confirm"
 
+# --- a refund the daemon did not build -------------------------------------
+#
+# The record only ever holds the refund this daemon built, so a refund broadcast
+# from anywhere else used to leave the swap unfinished for good: the deposit was
+# gone, the timeout had passed, and every tick rebuilt and rebroadcast a
+# transaction that could never be mined.
+
+pkill -f "maker run --dir $SWAPS" 2>/dev/null || true
+sleep 0.5
+
 echo
-echo "ok: daemon settled a swap it never saw created, and refunded one that timed out"
+echo "== a third swap, refunded by someone else while the daemon is down =="
+NEW3=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
+  --claim-pubkey "$TAKER_PUBKEY" --locktime-margin 8 2>/dev/null)
+ID3=$(printf '%s\n' "$NEW3" | field id)
+HASH3=$(printf '%s\n' "$NEW3" | field payment_hash)
+ADDRESS3=$(printf '%s\n' "$NEW3" | field htlc_address)
+DEPOSIT3=$(printf '%s\n' "$NEW3" | field deposit_txid)
+LOCKTIME3=$(printf '%s\n' "$NEW3" | field locktime)
+echo "swap id:       $ID3"
+echo "refund after:  height $LOCKTIME3"
+echo "paid for:      no, so nothing but a refund can spend the deposit"
+
+mine 1
+read -r VOUT3 SATS3 <<< "$(find_output "$DEPOSIT3" "$ADDRESS3")"
+[ -n "$VOUT3" ] || fail "the deposit does not pay the HTLC"
+
+# Whichever process holds this key, it is in the record.
+REFUND_SECRET3=$(python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1]))["refund_secret"])
+' "$SWAPS/$ID3.json")
+
+while [ "$(height)" -lt "$LOCKTIME3" ]; do mine 1; done
+RAW3=$(swapx refund --payment-hash "$HASH3" --locktime "$LOCKTIME3" \
+  --claim-pubkey "$TAKER_PUBKEY" --refund-key "$REFUND_SECRET3" \
+  --outpoint "$DEPOSIT3:$VOUT3" --value "$SATS3" \
+  --to "$(btc getnewaddress)" 2>/dev/null)
+TX3=$(btc sendrawtransaction "$RAW3")
+mine 1
+echo "refunded by:   someone other than the daemon ($TX3)"
+
+echo
+echo "== the daemon starts and finds the deposit already gone =="
+maker run --dir "$SWAPS" --interval 1 > "$WORK/maker3.out" 2> "$WORK/maker3.err" &
+STATE=$(await_swap_state "$ID3" refunded "$SWAPS") \
+  || fail "the daemon never noticed the deposit was gone (state=$STATE)"
+echo "swap state:    $STATE"
+
+# It has to adopt what happened rather than act on it: a refund of its own here
+# would be a transaction it could never get mined.
+OWN=$(python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1]))["refund_tx"] or "none")
+' "$SWAPS/$ID3.json")
+[ "$OWN" = "none" ] || fail "the daemon built a refund for an already-refunded deposit"
+echo "own refund:    none, so nothing is being rebroadcast forever"
+
+echo
+echo "ok: settled a swap it never saw created, refunded one that timed out,"
+echo "    and adopted a refund it did not send"

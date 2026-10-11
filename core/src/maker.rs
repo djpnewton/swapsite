@@ -65,6 +65,11 @@ pub struct Observed {
     pub height: u32,
     pub funding_confirmations: u32,
     pub refund_confirmations: u32,
+    /// Whether the deposit output is gone, whoever spent it.
+    ///
+    /// The record only ever holds the refund this daemon built, so a refund
+    /// from anywhere else is invisible without this.
+    pub deposit_spent: bool,
     pub invoice: InvoiceState,
 }
 
@@ -241,7 +246,12 @@ pub fn reconcile(record: &mut SwapRecord, observed: &Observed) -> Result<(), Rec
         record.restore(SwapState::Settled)?;
         return Ok(());
     }
-    if observed.refund_confirmations >= 1 {
+
+    // Nothing settled, yet the deposit is gone. Only the refund path can have
+    // spent it: a claim needs the preimage, and the preimage is only revealed by
+    // settling. So a spent output with an unsettled invoice is a refund, whether
+    // or not this daemon is the one that sent it.
+    if observed.refund_confirmations >= 1 || observed.deposit_spent {
         record.restore(SwapState::Refunded)?;
         return Ok(());
     }
@@ -341,6 +351,7 @@ mod tests {
             height,
             funding_confirmations: funding,
             refund_confirmations: 0,
+            deposit_spent: false,
             invoice,
         }
     }
@@ -521,5 +532,33 @@ mod tests {
         seen.refund_confirmations = 1;
         reconcile(&mut refunded, &seen).unwrap();
         assert_eq!(refunded.state, SwapState::Refunded);
+    }
+
+    #[test]
+    fn a_refund_nobody_recorded_still_finishes_the_swap() {
+        // The record only holds the refund this daemon built, so a refund from
+        // anywhere else used to leave the swap unfinished for good: the deposit
+        // was gone, the timeout had passed, and every tick rebuilt and
+        // rebroadcast a transaction that could never be mined.
+        let mut record = record(500);
+        let mut seen = observed(500, 1, InvoiceState::Open);
+        seen.deposit_spent = true;
+        reconcile(&mut record, &seen).unwrap();
+        assert_eq!(record.state, SwapState::Refunded);
+
+        assert_eq!(plan(&record, &seen), Action::Done);
+    }
+
+    #[test]
+    fn a_spent_deposit_after_settling_is_not_a_refund() {
+        // Once the invoice settles, the deposit being spent is the taker
+        // claiming it, which is the swap working. Reading that as a refund
+        // would report the maker as having taken back a deposit it was paid for
+        // - the opposite of what happened.
+        let mut record = record(500);
+        let mut seen = observed(500, 1, InvoiceState::Settled);
+        seen.deposit_spent = true;
+        reconcile(&mut record, &seen).unwrap();
+        assert_eq!(record.state, SwapState::Settled);
     }
 }
