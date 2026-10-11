@@ -11,12 +11,14 @@
 
 pub mod hash;
 pub mod htlc;
+pub mod lightning;
 pub mod params;
 pub mod spend;
 pub mod state;
 
 pub use hash::{PaymentHash, Preimage};
 pub use htlc::Htlc;
+pub use lightning::{check_joined, Invoice, InvoiceState, LightningNode, NodeInfo};
 pub use params::{LegTimelocks, TimelockError, MIN_MARGIN_BLOCKS};
 pub use spend::{claim, refund, SpendError};
 pub use state::{Event, StateError, SwapState};

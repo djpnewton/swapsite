@@ -4,6 +4,9 @@ description = "Core primitives for trustless BTC <-> Lightning swaps"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# The only binary is swapx; `src/bin/lncli.rs` is a module of it, not a second
+# binary.
+autobins = false
 
 [dependencies]
 bitcoin.workspace = true

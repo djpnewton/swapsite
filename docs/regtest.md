@@ -34,13 +34,32 @@ docker compose -f docker/docker-compose.yml up -d
 
 `regtest-init.sh` waits for the nodes, creates a wallet, mines 101 blocks (for
 coinbase maturity), funds both LND nodes, connects them, opens a channel from
-the maker to the taker and confirms it.
+the maker to the taker and confirms it. Half the channel is pushed to the taker,
+so both nodes have spendable outbound capacity and a swap can be tested in
+either direction.
 
 To exercise an on-chain HTLC leg against this chain (fund, claim, and a refund
 that is rejected early and then accepted after the timeout):
 
 ```bash
 ./scripts/regtest-onchain.sh
+```
+
+To run one complete swap, both legs, plus the canceled-invoice failure path:
+
+```bash
+./scripts/regtest-swap.sh
+```
+
+Both scripts source `scripts/lib.sh` and need `cargo` and `python3`.
+
+Each swap moves real balance from the taker to the maker over Lightning, so a
+long series of runs drains the taker's outbound capacity. The scripts refuse to
+start if capacity is too low and say so; reset with:
+
+```bash
+docker compose -f docker/docker-compose.yml down -v
+./scripts/regtest-init.sh
 ```
 
 Tear down, keeping data:

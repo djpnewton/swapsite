@@ -12,7 +12,7 @@ BTC=("${COMPOSE[@]}" exec -T bitcoind bitcoin-cli -regtest -rpcuser=bitcoin -rpc
 LND_MAKER=("${COMPOSE[@]}" exec -T lnd-maker lncli --network=regtest)
 LND_TAKER=("${COMPOSE[@]}" exec -T lnd-taker lncli --network=regtest)
 
-CHANNEL_AMT=1000000  # 0.01 BTC
+CHANNEL_AMT=5000000  # 0.05 BTC, enough headroom for repeated swap tests
 
 # Pull a top-level string field out of lncli's JSON without depending on jq.
 json_field() {
@@ -72,8 +72,11 @@ if ! "${LND_TAKER[@]}" listpeers | grep -q "$MAKER_PUB"; then
 fi
 
 if [ "$("${LND_MAKER[@]}" listchannels | grep -c '"active": true' || true)" -eq 0 ]; then
-  echo "opening channel maker -> taker ($CHANNEL_AMT sat)"
-  "${LND_MAKER[@]}" openchannel --node_key="$TAKER_PUB" --local_amt="$CHANNEL_AMT"
+  echo "opening channel maker -> taker ($CHANNEL_AMT sat, half pushed to the taker)"
+  # Pushing half the balance to the taker gives both nodes spendable outbound
+  # capacity, so a swap can be tested in either direction.
+  "${LND_MAKER[@]}" openchannel --node_key="$TAKER_PUB" \
+    --local_amt="$CHANNEL_AMT" --push_amt="$((CHANNEL_AMT / 2))"
   "${BTC[@]}" -rpcwallet=swap generatetoaddress 6 "$ADDR" >/dev/null
 fi
 

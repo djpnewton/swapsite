@@ -14,12 +14,15 @@ and Lightning HTLCs. The coordinator cannot move funds.
 
 ## Status
 
-M0 and M1a are done. The on-chain HTLC leg is implemented in Rust, verified with
-`libbitcoinconsensus` and end to end on regtest. Next is the Lightning leg.
+M0, M1a and M1b are done. Both legs are implemented in Rust and a complete swap
+runs end to end on regtest: the maker holds a Lightning invoice and funds an
+HTLC, and the taker claims the HTLC with the preimage that Lightning reveals.
+Next is the maker daemon.
 
 ```bash
 cargo test                       # unit tests, includes real script verification
 docker compose -f docker/docker-compose.yml up -d
-./scripts/regtest-init.sh        # fund nodes, open a channel
+./scripts/regtest-init.sh        # fund nodes, open a balanced channel
 ./scripts/regtest-onchain.sh     # fund, claim and refund an HTLC on-chain
+./scripts/regtest-swap.sh        # one complete swap, both legs, plus the failure path
 ```
