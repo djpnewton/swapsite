@@ -68,6 +68,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bech32"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -425,12 +431,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
+name = "swapsite-adapters"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bitcoin",
+ "hex",
+ "serde",
+ "serde_json",
+ "swapsite-core",
+ "thiserror",
+]
+
+[[package]]
+name = "swapsite-cli"
+version = "0.1.0"
+dependencies = [
+ "bitcoin",
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "swapsite-adapters",
+ "swapsite-core",
+]
+
+[[package]]
 name = "swapsite-core"
 version = "0.1.0"
 dependencies = [
  "bitcoin",
  "bitcoinconsensus",
- "clap",
  "hex",
  "serde",
  "serde_json",

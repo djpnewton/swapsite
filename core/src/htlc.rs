@@ -31,7 +31,7 @@ pub enum HtlcError {
 }
 
 /// Parameters of an on-chain HTLC leg.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Htlc {
     /// Hash unlocked by the preimage on the claim path.
     pub payment_hash: PaymentHash,

@@ -4,8 +4,6 @@
 //! so each party to a swap only ever handles its own secret. Used by the regtest
 //! scripts, and the seed of what becomes the maker daemon.
 
-mod lncli;
-
 use std::{path::PathBuf, str::FromStr};
 
 use bitcoin::{
@@ -13,6 +11,7 @@ use bitcoin::{
     Address, Amount, Network, OutPoint, PublicKey,
 };
 use clap::{Args, Parser, Subcommand};
+use swapsite_adapters::LnCli;
 use swapsite_core::{
     hash::{PaymentHash, Preimage},
     htlc::Htlc,
@@ -423,8 +422,8 @@ fn ln(cmd: LnCmd) -> Result<()> {
     Ok(())
 }
 
-fn client(args: &NodeArgs) -> lncli::LnCli {
-    lncli::LnCli::new(args.compose.clone(), &args.node, &args.network)
+fn client(args: &NodeArgs) -> LnCli {
+    LnCli::new(args.compose.clone(), &args.node, &args.network)
 }
 
 fn parse_network(name: &str) -> Result<Network> {

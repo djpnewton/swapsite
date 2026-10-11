@@ -51,7 +51,15 @@ To run one complete swap, both legs, plus the canceled-invoice failure path:
 ./scripts/regtest-swap.sh
 ```
 
-Both scripts source `scripts/lib.sh` and need `cargo` and `python3`.
+To run the maker daemon end to end (a cold-start settle, and a timed refund):
+
+```bash
+./scripts/regtest-maker.sh
+```
+
+All three scripts source `scripts/lib.sh`, which builds the binaries once and
+needs `cargo` and `python3`. `regtest-maker.sh` kills any daemon left over from
+an earlier run before it starts.
 
 Each swap moves real balance from the taker to the maker over Lightning, so a
 long series of runs drains the taker's outbound capacity. The scripts refuse to

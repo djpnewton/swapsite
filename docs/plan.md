@@ -161,7 +161,7 @@ flowchart LR
 | M0 | Local regtest environment in Docker (BTC + Lightning). | done |
 | M1a | On-chain HTLC leg: script builder, spends, timelock invariant, state machine. | done, see [m1.md](m1.md) |
 | M1b | Lightning leg: HODL invoices, hold/settle, joined to the on-chain leg. | done, see [m1.md](m1.md) |
-| M1c | Maker daemon: watch both legs, drive the machine, automate refunds. | not started |
+| M1c | Maker daemon: watch both legs, drive the machine, automate refunds. | done, see [m1.md](m1.md) |
 | M1d | WASM taker signer plus chain observation and broadcast relay. | not started |
 | M2 | Coordinator + web UI: quotes, single-maker order book, swap lifecycle, recovery page. | not started |
 | M3 | L-BTC legs: elements regtest, LWK signer. L-BTC <-> LN falls out of M1. | not started |
@@ -172,14 +172,24 @@ Registry of decisions:
 
 - Start with **BTC <-> LN only** (M1). It exercises every mechanism that the
   other pairs reuse.
-- **M1c (next).** The maker daemon: watch both legs, drive the state machine,
-  automate refunds.
+- **M1d (next).** The WASM taker signer, plus the chain observation and
+  broadcast relay a taker needs.
+- **M1c done:** the maker daemon settles and refunds swaps on its own, from
+  observed reality, and survives being restarted mid-swap.
 - **M1b done:** one swap now completes end to end on regtest. The maker holds an
   invoice, funds an HTLC, settles, and the taker claims with the revealed
   preimage, netting the amount it paid.
 - **Regtest in Docker** is the testing substrate from M0 onward.
 - **Rust for the protocol core.** One implementation serves the maker daemon and,
   compiled to WASM, the browser-side taker signer.
+- **Three crates: domain, adapters, entry points.** `swapsite-core` has no
+  sockets, filesystem or subprocesses; the impure work sits behind the `Chain`
+  and `LightningNode` traits in `swapsite-adapters`. This is what keeps the WASM
+  signer a compile target rather than a refactor.
+- **Persist signed transactions before broadcasting them.** A maker that crashes
+  mid-swap must be able to finish or undo the swap from disk alone.
+- **Observed reality wins over the local record.** Recovery adopts terminal
+  states seen on-chain or on Lightning, and can never adopt a non-terminal one.
 - **Heights only for refund timeouts.** Time-based locktimes are rejected when a
   swap is constructed.
 

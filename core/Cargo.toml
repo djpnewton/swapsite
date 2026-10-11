@@ -4,9 +4,6 @@ description = "Core primitives for trustless BTC <-> Lightning swaps"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-# The only binary is swapx; `src/bin/lncli.rs` is a module of it, not a second
-# binary.
-autobins = false
 
 [dependencies]
 bitcoin.workspace = true
@@ -14,13 +11,6 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
-# Only used by the `swapx` binary. Moves to its own crate when this library
-# starts targeting WASM.
-clap.workspace = true
-
-[[bin]]
-name = "swapx"
-path = "src/bin/swapx.rs"
 
 [dev-dependencies]
 # Runs the real Bitcoin script interpreter over our spends in unit tests.

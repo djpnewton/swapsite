@@ -53,19 +53,32 @@ pub enum StateError {
     NotLockedYet,
     #[error("cannot refund: the initiator leg is not funded")]
     NothingToRefund,
+    #[error("refusing to adopt non-terminal state {0:?} from outside")]
+    NotTerminal(SwapState),
 }
 
 impl SwapState {
     pub fn is_terminal(self) -> bool {
         matches!(self, SwapState::Settled | SwapState::Refunded)
     }
-
     /// Whether the initiator can still recover their funds from here.
     pub fn can_refund(self) -> bool {
         matches!(
             self,
             SwapState::InitiatorFunded | SwapState::CounterpartyLocked
         )
+    }
+
+    /// Adopt a state observed from outside, for crash recovery.
+    ///
+    /// Only terminal states can be adopted. A swap that is settled or refunded
+    /// on the network must not be un-finished by a stale local record.
+    pub fn restore(self, observed: SwapState) -> Result<SwapState, StateError> {
+        if observed.is_terminal() {
+            Ok(observed)
+        } else {
+            Err(StateError::NotTerminal(observed))
+        }
     }
 
     /// Apply `event`, returning the next state or explaining the refusal.
@@ -95,6 +108,21 @@ impl SwapState {
             // still has to be total.
             (Settled, _) | (Refunded, _) => Err(StateError::Finished(self)),
         }
+    }
+}
+
+/// Names match the serde representation, so a state can travel between a
+/// record on disk, a log line and a status output without being reinterpreted.
+impl std::fmt::Display for SwapState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            SwapState::Created => "created",
+            SwapState::InitiatorFunded => "initiator_funded",
+            SwapState::CounterpartyLocked => "counterparty_locked",
+            SwapState::Settled => "settled",
+            SwapState::Refunded => "refunded",
+        };
+        f.write_str(name)
     }
 }
 
@@ -223,6 +251,22 @@ mod tests {
         }
         for state in [Created, Settled, Refunded] {
             assert!(!state.can_refund(), "{state:?} should not be refundable");
+        }
+    }
+
+    #[test]
+    fn restore_only_adopts_terminal_states() {
+        // Recovery from a crash may jump straight to a finished state.
+        assert_eq!(Created.restore(Settled).unwrap(), Settled);
+        assert_eq!(Created.restore(Refunded).unwrap(), Refunded);
+        assert_eq!(InitiatorFunded.restore(Settled).unwrap(), Settled);
+
+        // It must not be usable to walk somewhere non-terminal by hand.
+        for wanted in [Created, InitiatorFunded, CounterpartyLocked] {
+            assert_eq!(
+                Created.restore(wanted),
+                Err(StateError::NotTerminal(wanted))
+            );
         }
     }
 }

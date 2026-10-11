@@ -9,16 +9,20 @@
 
 #![forbid(unsafe_code)]
 
+pub mod chain;
 pub mod hash;
 pub mod htlc;
 pub mod lightning;
+pub mod maker;
 pub mod params;
 pub mod spend;
 pub mod state;
 
+pub use chain::{Chain, ChainError};
 pub use hash::{PaymentHash, Preimage};
 pub use htlc::Htlc;
 pub use lightning::{check_joined, Invoice, InvoiceState, LightningNode, NodeInfo};
+pub use maker::{plan, reconcile, Action, Observed, SwapRecord};
 pub use params::{LegTimelocks, TimelockError, MIN_MARGIN_BLOCKS};
 pub use spend::{claim, refund, SpendError};
 pub use state::{Event, StateError, SwapState};
