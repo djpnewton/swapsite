@@ -6,9 +6,11 @@
 //! signer.
 
 pub mod bitcoind;
+pub mod http;
 pub mod lncli;
 pub mod store;
 
 pub use bitcoind::{BitcoinRpc, RawTransaction};
+pub use http::{fetch, Fetched, Request, Response};
 pub use lncli::LnCli;
 pub use store::SwapStore;

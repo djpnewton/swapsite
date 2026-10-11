@@ -1,0 +1,186 @@
+:root {
+  color-scheme: dark;
+  --bg: #10131a;
+  --card: #181d27;
+  --line: #2a3244;
+  --text: #e6e9ef;
+  --dim: #9aa4b8;
+  --accent: #f7931a;
+  --good: #3fbf7f;
+  --bad: #e5534b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 2rem 1rem 4rem;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+main {
+  max-width: 46rem;
+  margin: 0 auto;
+}
+
+h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.9rem;
+  letter-spacing: -0.02em;
+}
+
+h2 {
+  margin: 0 0 1rem;
+  font-size: 1.1rem;
+}
+
+.lead {
+  margin: 0 0 2rem;
+  color: var(--dim);
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+input {
+  background: #0d1017;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: inherit;
+  font: inherit;
+  padding: 0.5rem 0.65rem;
+  min-width: 8rem;
+}
+
+input[type="number"] {
+  width: 9rem;
+}
+
+button {
+  background: #222a38;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.5rem 0.9rem;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a1205;
+  font-weight: 600;
+}
+
+.quote {
+  color: var(--dim);
+  min-height: 1.5rem;
+}
+
+.swap {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  background: var(--card);
+}
+
+.swap-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+}
+
+.swap-id {
+  color: var(--dim);
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+}
+
+.badge {
+  border-radius: 999px;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.6rem;
+  border: 1px solid var(--line);
+  color: var(--dim);
+}
+
+.badge.good {
+  border-color: var(--good);
+  color: var(--good);
+}
+
+.badge.bad {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0.75rem 0;
+  font-size: 0.9rem;
+}
+
+dt {
+  color: var(--dim);
+}
+
+dd {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
+}
+
+.error {
+  color: var(--bad);
+  margin: 0.5rem 0 0;
+  font-size: 0.9rem;
+}
+
+.ok {
+  color: var(--good);
+  margin: 0.5rem 0 0;
+  font-size: 0.9rem;
+}
+
+footer {
+  color: var(--dim);
+  font-size: 0.85rem;
+  margin-top: 2rem;
+}

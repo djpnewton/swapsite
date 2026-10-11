@@ -9,7 +9,8 @@
 
 import { argv, env, exit } from "node:process";
 
-import { loadTaker, relay } from "./taker.mjs";
+import { relay } from "./relay.mjs";
+import { loadTaker } from "./taker-node.mjs";
 
 const WASM =
   env.SWAPSITE_WASM ?? "target/wasm32-unknown-unknown/release/swapsite_wasm.wasm";

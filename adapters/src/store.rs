@@ -128,6 +128,7 @@ mod tests {
             payment_hash: preimage.payment_hash(),
             preimage,
             amount_sat: 30_000,
+            fee_sat: 30,
             deposit_sat: 32_000,
             claim_fee_sat: 2_000,
             refund_fee_sat: 2_000,

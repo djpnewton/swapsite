@@ -1,4 +1,4 @@
-//! `maker` - the maker daemon.
+//! `maker` - the maker daemon and its control plane.
 //!
 //! Drives the maker's side of reverse submarine swaps from observed reality.
 //! Every signed transaction is written to the swap record before it is
@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -15,13 +16,17 @@ use bitcoin::{
     Address, Amount, Network, PublicKey, Transaction,
 };
 use clap::{Args, Parser, Subcommand};
-use swapsite_adapters::{BitcoinRpc, LnCli, SwapStore};
+use serde_json::json;
+use swapsite_adapters::{
+    http::{serve as serve_http, Request, Response},
+    BitcoinRpc, LnCli, SwapStore,
+};
 use swapsite_core::{
     chain::Chain,
     hash::Preimage,
     htlc::Htlc,
     lightning::LightningNode,
-    maker::{plan, reconcile, Action, Funding, Observed, SwapRecord},
+    maker::{plan, reconcile, Action, Funding, Observed, PublicSwap, SwapRecord},
     state::{Event, SwapState},
 };
 
@@ -43,6 +48,9 @@ enum Cmd {
         /// What the taker pays over Lightning, in satoshis.
         #[arg(long)]
         amount: u64,
+        /// The maker's fee, paid by the taker on top of `amount`.
+        #[arg(long, default_value_t = 0)]
+        fee: u64,
         /// The taker's claim key, hex.
         #[arg(long)]
         claim_pubkey: String,
@@ -75,9 +83,18 @@ enum Cmd {
         #[arg(long)]
         id: Option<String>,
     },
+
+    /// Run the daemon and serve its control plane.
+    Serve {
+        #[command(flatten)]
+        config: NodeConfig,
+        /// Address to listen on.
+        #[arg(long, default_value = "127.0.0.1:3200")]
+        listen: String,
+    },
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct NodeConfig {
     /// Directory holding one JSON file per swap.
     #[arg(long, default_value = "swaps")]
@@ -142,37 +159,71 @@ fn main() -> Result<()> {
         Cmd::NewSwap {
             config,
             amount,
+            fee,
             claim_pubkey,
             claim_fee,
             locktime_margin,
             refund_fee,
         } => new_swap(
             &config,
-            amount,
-            &claim_pubkey,
-            claim_fee,
-            locktime_margin,
-            refund_fee,
+            &NewSwapRequest {
+                amount,
+                fee,
+                claim_pubkey,
+                claim_fee,
+                locktime_margin,
+                refund_fee,
+            },
         ),
         Cmd::Run { config, once } => run(&config, once),
         Cmd::Status { config, id } => status(&config, id.as_deref()),
+        Cmd::Serve { config, listen } => serve(&config, &listen),
     }
 }
 
-fn new_swap(
-    config: &NodeConfig,
-    amount_sat: u64,
-    claim_pubkey: &str,
-    claim_fee_sat: u64,
+/// A request to create a swap, from the CLI or over the control plane.
+#[derive(Debug, serde::Deserialize)]
+struct NewSwapRequest {
+    /// What the taker receives on chain.
+    amount: u64,
+    /// The maker's fee, paid by the taker on top.
+    #[serde(default)]
+    fee: u64,
+    /// The taker's claim key, hex.
+    claim_pubkey: String,
+    /// Fee the taker pays to claim, in satoshis. Added to the deposit so the
+    /// taker nets exactly `amount`.
+    #[serde(default = "default_claim_fee")]
+    claim_fee: u64,
+    /// Blocks from now until the deposit can be refunded.
+    #[serde(default = "default_locktime_margin")]
     locktime_margin: u32,
-    refund_fee_sat: u64,
-) -> Result<()> {
+    /// Fee for the refund transaction, in satoshis.
+    #[serde(default = "default_refund_fee")]
+    refund_fee: u64,
+}
+
+fn default_claim_fee() -> u64 {
+    2_000
+}
+
+fn default_locktime_margin() -> u32 {
+    30
+}
+
+fn default_refund_fee() -> u64 {
+    2_000
+}
+
+/// Build, persist and broadcast the maker's side of a new swap.
+fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<SwapRecord> {
     let chain = config.chain()?;
     let lightning = config.lightning();
     let store = config.store()?;
 
-    let claim_pubkey = PublicKey::from_str(claim_pubkey)?;
-    let locktime = chain.height()? + locktime_margin;
+    let amount_sat = request.amount;
+    let claim_pubkey = PublicKey::from_str(&request.claim_pubkey)?;
+    let locktime = chain.height()? + request.locktime_margin;
 
     // A fresh refund key per swap, so one leaked record cannot expose the rest.
     let secp = Secp256k1::new();
@@ -189,8 +240,8 @@ fn new_swap(
     )?;
     let address = htlc.address(config.network()?);
 
-    // Deposit enough for the taker to claim and still net what it paid.
-    let deposit_sat = amount_sat + claim_fee_sat;
+    // Deposit enough for the taker to claim and still net what it was quoted.
+    let deposit_sat = amount_sat + request.claim_fee;
     let funding = chain.fund(&address, Amount::from_sat(deposit_sat))?;
 
     let script_pubkey = address.script_pubkey();
@@ -202,16 +253,17 @@ fn new_swap(
         .map(|(vout, output)| (vout as u32, output.value.to_sat()))
         .ok_or("the funded transaction does not pay the HTLC")?;
 
-    let invoice = lightning.add_hold_invoice(&preimage, amount_sat, "swap")?;
+    let invoice = lightning.add_hold_invoice(&preimage, amount_sat + request.fee, "swap")?;
 
     let record = SwapRecord {
         id: preimage.payment_hash().to_hex(),
         payment_hash: preimage.payment_hash(),
         preimage,
         amount_sat,
+        fee_sat: request.fee,
         deposit_sat,
-        claim_fee_sat,
-        refund_fee_sat,
+        claim_fee_sat: request.claim_fee,
+        refund_fee_sat: request.refund_fee,
         claim_pubkey: claim_pubkey.to_string(),
         refund_secret: hex::encode(refund_key.secret_bytes()),
         refund_pubkey: refund_pubkey.to_string(),
@@ -239,84 +291,191 @@ fn new_swap(
         );
     }
 
-    eprintln!("swap created: deposit {sats} sat locked until height {locktime}");
+    Ok(record)
+}
+
+fn new_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<()> {
+    let record = create_swap(config, request)?;
+
+    eprintln!(
+        "swap created: deposit {} sat locked until height {}",
+        record.deposit_sat, record.locktime
+    );
     println!("id={}", record.id);
     println!("bolt11={}", record.bolt11);
     println!("htlc_address={}", record.htlc_address);
     println!("payment_hash={}", record.payment_hash);
-    println!("deposit_txid={deposit_txid}");
-    println!("locktime={locktime}");
-    println!("amount={amount_sat}");
-    println!("claim_fee={claim_fee_sat}");
+    println!(
+        "deposit_txid={}",
+        record
+            .funding
+            .as_ref()
+            .map(|f| f.txid.as_str())
+            .unwrap_or("-")
+    );
+    println!("locktime={}", record.locktime);
+    println!("amount={}", record.amount_sat);
+    println!("fee={}", record.fee_sat);
+    println!("invoice={}", record.invoice_sat());
+    println!("claim_fee={}", record.claim_fee_sat);
     // Public: the taker needs it to rebuild the HTLC and check the deposit.
     println!("refund_pubkey={}", record.refund_pubkey);
     Ok(())
 }
 
+/// The daemon loop.
 fn run(config: &NodeConfig, once: bool) -> Result<()> {
-    let chain = config.chain()?;
-    let lightning = config.lightning();
-    let store = config.store()?;
-
     loop {
-        let height = chain.height()?;
-        for mut record in store.all()? {
-            let observed = observe(&record, &chain, &lightning, height)?;
-            let before = record.state;
-            reconcile(&mut record, &observed)?;
-            if before != record.state {
-                note(&record, format!("state {before} -> {}", record.state));
-            }
-
-            match plan(&record, &observed) {
-                // Nothing worth logging every tick: the state transitions above
-                // and `maker status` are where progress shows up.
-                Action::Wait(_) | Action::Done => {}
-
-                Action::RebroadcastFunding => {
-                    let tx = decode_hex(record.funding_tx.as_deref().unwrap_or_default())?;
-                    match chain.broadcast(&tx) {
-                        Ok(txid) => note(&record, format!("re-sent deposit {txid}")),
-                        Err(e) => note(&record, format!("deposit re-send failed: {e}")),
-                    }
-                }
-
-                Action::Settle => {
-                    lightning.settle(&record.preimage)?;
-                    let _ = record.advance(Event::Settle);
-                    note(
-                        &record,
-                        "settled, preimage revealed to the taker".to_owned(),
-                    );
-                }
-
-                Action::Refund => {
-                    // Built once and kept in the record, so every later tick just
-                    // rebroadcasts the same signed transaction until it confirms.
-                    let built_now = record.refund_tx.is_none();
-                    if built_now {
-                        build_refund(&mut record, &chain)?;
-                        store.save(&record)?;
-                    }
-                    let tx = decode_hex(record.refund_tx.as_deref().unwrap_or_default())?;
-                    match chain.broadcast(&tx) {
-                        Ok(txid) if built_now => {
-                            note(&record, format!("refund built and broadcast, {txid}"))
-                        }
-                        Ok(_) => {}
-                        Err(e) => note(&record, format!("refund not accepted yet: {e}")),
-                    }
-                }
-            }
-
-            store.save(&record)?;
-        }
-
+        tick(config)?;
         if once {
             return Ok(());
         }
         sleep(Duration::from_secs(config.interval));
     }
+}
+
+/// Run the daemon, and serve its control plane on the side.
+fn serve(config: &NodeConfig, listen: &str) -> Result<()> {
+    // The swap machine keeps ticking in the background; the control plane only
+    // reads and creates.
+    let ticker = config.clone();
+    thread::spawn(move || loop {
+        if let Err(e) = tick(&ticker) {
+            eprintln!("[maker] tick failed: {e}");
+        }
+        sleep(Duration::from_secs(ticker.interval));
+    });
+
+    let api = Api {
+        config: config.clone(),
+    };
+    serve_http(listen, move |request| api.route(&request))?;
+    Ok(())
+}
+
+/// The maker's control plane.
+///
+/// Everything a coordinator or a taker may see, and nothing they may not: swaps
+/// leave here through [`SwapRecord::public`], so the preimage and the refund
+/// secret cannot escape by accident.
+struct Api {
+    config: NodeConfig,
+}
+
+impl Api {
+    fn route(&self, request: &Request) -> Response {
+        if request.matches("GET", "/swaps").is_some() {
+            return self.list();
+        }
+        if request.matches("POST", "/swaps").is_some() {
+            return self.create(request);
+        }
+        if let Some(captures) = request.matches("GET", "/swaps/:id") {
+            return self.show(&captures[0]);
+        }
+        Response::not_found()
+    }
+
+    fn list(&self) -> Response {
+        let swaps = (|| -> Result<Vec<PublicSwap>> {
+            let store = self.config.store()?;
+            let mut swaps = Vec::new();
+            for record in store.all()? {
+                swaps.push(record.public()?);
+            }
+            Ok(swaps)
+        })();
+
+        match swaps {
+            Ok(swaps) => Response::json(200, &json!({ "swaps": swaps })),
+            Err(e) => Response::error(500, e.to_string()),
+        }
+    }
+
+    fn show(&self, id: &str) -> Response {
+        let swap = (|| -> Result<PublicSwap> { Ok(self.config.store()?.load(id)?.public()?) })();
+
+        match swap {
+            Ok(swap) => Response::json(200, &json!(swap)),
+            Err(e) => Response::error(404, e.to_string()),
+        }
+    }
+
+    fn create(&self, request: &Request) -> Response {
+        let params: NewSwapRequest = match serde_json::from_str(&request.body) {
+            Ok(params) => params,
+            Err(e) => return Response::error(400, format!("bad request: {e}")),
+        };
+
+        match create_swap(&self.config, &params) {
+            Ok(record) => match record.public() {
+                Ok(swap) => Response::json(201, &json!(swap)),
+                Err(e) => Response::error(500, e.to_string()),
+            },
+            Err(e) => Response::error(400, e.to_string()),
+        }
+    }
+}
+
+/// One pass over every swap. Everything that changes does so in here.
+fn tick(config: &NodeConfig) -> Result<()> {
+    let chain = config.chain()?;
+    let lightning = config.lightning();
+    let store = config.store()?;
+
+    let height = chain.height()?;
+    for mut record in store.all()? {
+        let observed = observe(&record, &chain, &lightning, height)?;
+        let before = record.state;
+        reconcile(&mut record, &observed)?;
+        if before != record.state {
+            note(&record, format!("state {before} -> {}", record.state));
+        }
+
+        match plan(&record, &observed) {
+            // Nothing worth logging every tick: the state transitions above
+            // and `maker status` are where progress shows up.
+            Action::Wait(_) | Action::Done => {}
+
+            Action::RebroadcastFunding => {
+                let tx = decode_hex(record.funding_tx.as_deref().unwrap_or_default())?;
+                match chain.broadcast(&tx) {
+                    Ok(txid) => note(&record, format!("re-sent deposit {txid}")),
+                    Err(e) => note(&record, format!("deposit re-send failed: {e}")),
+                }
+            }
+
+            Action::Settle => {
+                lightning.settle(&record.preimage)?;
+                let _ = record.advance(Event::Settle);
+                note(
+                    &record,
+                    "settled, preimage revealed to the taker".to_owned(),
+                );
+            }
+
+            Action::Refund => {
+                // Built once and kept in the record, so every later tick just
+                // rebroadcasts the same signed transaction until it confirms.
+                let built_now = record.refund_tx.is_none();
+                if built_now {
+                    build_refund(&mut record, &chain)?;
+                    store.save(&record)?;
+                }
+                let tx = decode_hex(record.refund_tx.as_deref().unwrap_or_default())?;
+                match chain.broadcast(&tx) {
+                    Ok(txid) if built_now => {
+                        note(&record, format!("refund built and broadcast, {txid}"))
+                    }
+                    Ok(_) => {}
+                    Err(e) => note(&record, format!("refund not accepted yet: {e}")),
+                }
+            }
+        }
+
+        store.save(&record)?;
+    }
+    Ok(())
 }
 
 /// Read the state of the world for one swap. Never guesses from the record.
@@ -369,6 +528,8 @@ fn status(config: &NodeConfig, id: Option<&str>) -> Result<()> {
         println!("id={}", record.id);
         println!("state={}", record.state);
         println!("amount={}", record.amount_sat);
+        println!("fee={}", record.fee_sat);
+        println!("invoice={}", record.invoice_sat());
         println!("deposit={}", record.deposit_sat);
         println!("locktime={}", record.locktime);
         println!("htlc_address={}", record.htlc_address);

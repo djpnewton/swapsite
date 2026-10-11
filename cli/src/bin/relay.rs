@@ -13,18 +13,17 @@
 //! take funds: the taker checks the deposit script itself and signs its own
 //! transaction with a key the relay never sees.
 //!
-//! Deliberately a hand-rolled HTTP/1.1 server. It answers one request per
-//! connection and serves three routes on a trusted host.
+//! Deliberately tiny: the shared local HTTP server, and three routes.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
-use std::thread;
 
 use bitcoin::{Transaction, Txid};
 use clap::Parser;
-use serde_json::{json, Value};
-use swapsite_adapters::{BitcoinRpc, RawTransaction};
+use serde_json::json;
+use swapsite_adapters::{
+    http::{serve, Request, Response},
+    BitcoinRpc, RawTransaction,
+};
 use swapsite_core::chain::Chain;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -71,134 +70,51 @@ impl Node for BitcoinRpc {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let node = BitcoinRpc::new(&cli.bitcoin_url, None, parse_network(&cli.network)?)?;
-    let listener = TcpListener::bind(&cli.listen)?;
-    eprintln!("relay listening on http://{}", cli.listen);
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let node = node.clone();
-                thread::spawn(move || {
-                    if let Err(e) = serve(stream, &node) {
-                        eprintln!("connection: {e}");
-                    }
-                });
-            }
-            Err(e) => eprintln!("accept: {e}"),
-        }
-    }
+    serve(&cli.listen, move |request| route(&node, &request))?;
     Ok(())
 }
 
-fn serve(mut stream: TcpStream, node: &dyn Node) -> std::io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
-
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line)? == 0 {
-        return Ok(());
-    }
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_owned();
-    let path = parts.next().unwrap_or("/").to_owned();
-
-    let mut content_length = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            break;
-        }
-        if line.trim().is_empty() {
-            break;
-        }
-        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-            content_length = value.trim().parse().unwrap_or(0);
-        }
-    }
-
-    let body = if content_length > 0 {
-        let mut buffer = vec![0u8; content_length];
-        reader.read_exact(&mut buffer)?;
-        String::from_utf8_lossy(&buffer).into_owned()
-    } else {
-        String::new()
-    };
-
-    let (status, payload) = route(node, &method, &path, &body);
-    let body = payload.to_string();
-    let head = format!(
-        "HTTP/1.1 {status} {}\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Headers: Content-Type\r\n\
-         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
-         Connection: close\r\n\r\n",
-        reason(status),
-        body.len()
-    );
-
-    stream.write_all(head.as_bytes())?;
-    stream.write_all(body.as_bytes())?;
-    stream.flush()
-}
-
 /// Route one request. Pure apart from the node calls, and tested as such.
-fn route(node: &dyn Node, method: &str, path: &str, body: &str) -> (u16, Value) {
-    let path = path.split('?').next().unwrap_or(path);
+fn route(node: &dyn Node, request: &Request) -> Response {
+    if request.matches("GET", "/height").is_some() {
+        return match node.height() {
+            Ok(height) => Response::json(200, &json!({ "height": height })),
+            Err(e) => Response::json(502, &json!({ "error": e })),
+        };
+    }
 
-    match (method, path) {
-        // Posting raw hex as text/plain avoids a CORS preflight, but answer one
-        // anyway in case a page sends something else.
-        ("OPTIONS", _) => (204, json!({})),
+    if let Some(captures) = request.matches("GET", "/tx/:txid") {
+        return match Txid::from_str(&captures[0]) {
+            Err(e) => Response::error(400, format!("bad txid: {e}")),
+            Ok(txid) => match node.transaction(&txid) {
+                Ok(Some(tx)) => Response::json(
+                    200,
+                    &json!({
+                        "txid": txid.to_string(),
+                        "confirmations": tx.confirmations,
+                        "hex": tx.hex,
+                    }),
+                ),
+                Ok(None) => Response::error(404, "unknown transaction"),
+                Err(e) => Response::json(502, &json!({ "error": e })),
+            },
+        };
+    }
 
-        ("GET", "/height") => match node.height() {
-            Ok(height) => (200, json!({ "height": height })),
-            Err(e) => (502, json!({ "error": e })),
-        },
-
-        ("GET", tx) if tx.starts_with("/tx/") => {
-            let text = &tx["/tx/".len()..];
-            match Txid::from_str(text) {
-                Err(e) => (400, json!({ "error": format!("bad txid: {e}") })),
-                Ok(txid) => match node.transaction(&txid) {
-                    Ok(Some(tx)) => (
-                        200,
-                        json!({
-                            "txid": txid.to_string(),
-                            "confirmations": tx.confirmations,
-                            "hex": tx.hex,
-                        }),
-                    ),
-                    Ok(None) => (404, json!({ "error": "unknown transaction" })),
-                    Err(e) => (502, json!({ "error": e })),
-                },
-            }
-        }
-
-        ("POST", "/tx") => match hex::decode(body.trim()) {
-            Err(e) => (400, json!({ "error": format!("bad hex: {e}") })),
+    if request.matches("POST", "/tx").is_some() {
+        return match hex::decode(request.body.trim()) {
+            Err(e) => Response::error(400, format!("bad hex: {e}")),
             Ok(bytes) => match bitcoin::consensus::deserialize::<Transaction>(&bytes) {
-                Err(e) => (400, json!({ "error": format!("bad transaction: {e}") })),
+                Err(e) => Response::error(400, format!("bad transaction: {e}")),
                 Ok(tx) => match node.broadcast(&tx) {
-                    Ok(txid) => (200, json!({ "txid": txid.to_string() })),
-                    Err(e) => (400, json!({ "error": e })),
+                    Ok(txid) => Response::json(200, &json!({ "txid": txid.to_string() })),
+                    Err(e) => Response::error(400, e),
                 },
             },
-        },
-
-        _ => (404, json!({ "error": "not found" })),
+        };
     }
-}
 
-fn reason(status: u16) -> &'static str {
-    match status {
-        200 => "OK",
-        204 => "No Content",
-        400 => "Bad Request",
-        404 => "Not Found",
-        502 => "Bad Gateway",
-        _ => "OK",
-    }
+    Response::not_found()
 }
 
 fn parse_network(name: &str) -> Result<bitcoin::Network> {
@@ -217,6 +133,7 @@ mod tests {
     use bitcoin::{
         absolute::LockTime, Amount, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Witness,
     };
+    use serde_json::Value;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -270,15 +187,38 @@ mod tests {
         }
     }
 
+    fn request(method: &str, path: &str, body: &str) -> Request {
+        let raw = format!(
+            "{method} {path} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mut reader = std::io::Cursor::new(raw.into_bytes());
+        swapsite_adapters::http::read_request(&mut reader)
+            .unwrap()
+            .unwrap()
+    }
+
+    fn get(path: &str) -> Request {
+        request("GET", path, "")
+    }
+
+    fn post(path: &str, body: &str) -> Request {
+        request("POST", path, body)
+    }
+
+    fn body_of(response: Response) -> Value {
+        serde_json::from_slice(&response.body).expect("response body is JSON")
+    }
+
     #[test]
     fn serves_the_height() {
         let node = FakeNode {
             height: 4321,
             ..Default::default()
         };
-        let (status, body) = route(&node, "GET", "/height", "");
-        assert_eq!(status, 200);
-        assert_eq!(body["height"], 4321);
+        let response = route(&node, &get("/height"));
+        assert_eq!(response.status, 200);
+        assert_eq!(body_of(response)["height"], 4321);
     }
 
     #[test]
@@ -296,8 +236,9 @@ mod tests {
             ..Default::default()
         };
 
-        let (status, body) = route(&node, "GET", &format!("/tx/{txid}"), "");
-        assert_eq!(status, 200);
+        let response = route(&node, &get(&format!("/tx/{txid}")));
+        assert_eq!(response.status, 200);
+        let body = body_of(response);
         assert_eq!(body["confirmations"], 3);
         assert_eq!(
             body["hex"].as_str().unwrap(),
@@ -311,23 +252,26 @@ mod tests {
             height: 7,
             ..Default::default()
         };
-        let (status, _) = route(&node, "GET", "/height?cachebust=1", "");
-        assert_eq!(status, 200);
+        let response = route(&node, &get("/height?cachebust=1"));
+        assert_eq!(response.status, 200);
     }
 
     #[test]
     fn reports_an_unknown_transaction() {
         let node = FakeNode::default();
-        let (status, body) = route(&node, "GET", &format!("/tx/{}", "ab".repeat(32)), "");
-        assert_eq!(status, 404);
-        assert!(body["error"].as_str().unwrap().contains("unknown"));
+        let response = route(&node, &get(&format!("/tx/{}", "ab".repeat(32))));
+        assert_eq!(response.status, 404);
+        assert!(body_of(response)["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown"));
     }
 
     #[test]
     fn rejects_a_malformed_txid() {
         let node = FakeNode::default();
-        let (status, _) = route(&node, "GET", "/tx/not-a-txid", "");
-        assert_eq!(status, 400);
+        let response = route(&node, &get("/tx/not-a-txid"));
+        assert_eq!(response.status, 400);
     }
 
     #[test]
@@ -335,10 +279,10 @@ mod tests {
         let node = FakeNode::default();
         let hex = bitcoin::consensus::encode::serialize_hex(&sample_tx());
 
-        let (status, body) = route(&node, "POST", "/tx", &hex);
-        assert_eq!(status, 200);
+        let response = route(&node, &post("/tx", &hex));
+        assert_eq!(response.status, 200);
         assert_eq!(
-            body["txid"].as_str().unwrap(),
+            body_of(response)["txid"].as_str().unwrap(),
             sample_tx().compute_txid().to_string()
         );
         assert_eq!(node.broadcast.lock().unwrap().len(), 1);
@@ -351,22 +295,23 @@ mod tests {
             ..Default::default()
         };
         let hex = bitcoin::consensus::encode::serialize_hex(&sample_tx());
-        let (status, body) = route(&node, "POST", "/tx", &hex);
-        assert_eq!(status, 400);
-        assert_eq!(body["error"], "rejected");
+        let response = route(&node, &post("/tx", &hex));
+        assert_eq!(response.status, 400);
+        assert_eq!(body_of(response)["error"], "rejected");
     }
 
     #[test]
     fn rejects_rubbish_on_the_broadcast_route() {
         let node = FakeNode::default();
-        assert_eq!(route(&node, "POST", "/tx", "not hex").0, 400);
-        assert_eq!(route(&node, "POST", "/tx", "00").0, 400);
+        assert_eq!(route(&node, &post("/tx", "not hex")).status, 400);
+        assert_eq!(route(&node, &post("/tx", "00")).status, 400);
     }
 
     #[test]
-    fn preflight_and_unknown_routes() {
+    fn unknown_routes_are_not_found() {
+        // Preflights are answered by the shared server before routing.
         let node = FakeNode::default();
-        assert_eq!(route(&node, "OPTIONS", "/tx", "").0, 204);
-        assert_eq!(route(&node, "GET", "/nothing", "").0, 404);
+        assert_eq!(route(&node, &get("/nothing")).status, 404);
+        assert_eq!(route(&node, &request("DELETE", "/tx", "")).status, 404);
     }
 }

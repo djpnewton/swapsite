@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>swapsite</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>swapsite</h1>
+        <p class="lead">
+          Trustless swaps between Lightning and on-chain bitcoin. The key that
+          claims your coins is made in this page and never leaves it. The
+          coordinator holds no funds, and the relay only reads the chain and
+          carries your transaction.
+        </p>
+      </header>
+
+      <section class="card">
+        <h2>Start a swap</h2>
+        <div class="row">
+          <label for="amount">You receive, in satoshis</label>
+          <input
+            id="amount"
+            type="number"
+            min="1000"
+            step="1000"
+            value="30000"
+          />
+        </div>
+        <p class="quote" id="quote"></p>
+        <button id="create" class="primary">Get a quote</button>
+      </section>
+
+      <section id="swaps"></section>
+
+      <footer>
+        <span id="foot">loading…</span>
+      </footer>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

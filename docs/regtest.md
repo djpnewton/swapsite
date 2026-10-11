@@ -141,6 +141,31 @@ From inside the compose network:
 The coordinator holds no keys. It needs LND access only to observe invoices and
 to have the maker act; it never needs the taker's keys.
 
+## Clicking through a swap in a browser
+
+Three processes, then the page:
+
+```bash
+target/debug/relay --listen 127.0.0.1:3100 &
+target/debug/maker serve --dir /tmp/swaps --listen 127.0.0.1:3200 &
+target/debug/coordinator serve --listen 127.0.0.1:8090 \
+  --maker-url http://127.0.0.1:3200 --relay-url http://127.0.0.1:3100 \
+  --dir /tmp/records --web web \
+  --wasm target/wasm32-unknown-unknown/release/swapsite_wasm.wasm --dev-pay
+```
+
+Build the module first: `./scripts/regtest-wasm.sh` does it, or
+`cargo build -p swapsite-wasm --release --target wasm32-unknown-unknown`.
+
+Then <http://127.0.0.1:8090/>: quote, mine a block, check the deposit, pay,
+claim, mine again. The maker funds the deposit on its own, so the page needs no
+wallet until the claim, which it signs itself. `--dev-pay` pays the taker's
+invoice from the taker's own node so the flow can be driven without a second
+wallet; without it the page shows an invoice for the user to pay.
+
+`scripts/regtest-coordinator.sh` runs the same flow over HTTP, from the shell.
+Do not run it while these three are up: it wants the same ports.
+
 ## Notes and gotchas
 
 - Named volumes inherit ownership from the image path, so the non-root users in
@@ -150,7 +175,16 @@ to have the maker act; it never needs the taker's keys.
   catastrophic anywhere else. Do not reuse these confs on mainnet.
 - ZMQ is wired up because LND uses it for faster block notification; the
   coordinator can also poll `getblockchaininfo`.
-- A browser-facing Esplora / electrs service is not included yet. It is needed
-  once the frontend has to observe the chain itself (M2).
-- The coordinator and frontend services are intentionally absent from the
-  compose file until there is code to run.
+- A browser-facing Esplora / electrs service is not included yet. The relay
+  covers what the taker needs - height, a transaction, broadcast - but it is not
+  a light client and it does not serve the wallet-side queries (utxos, history)
+  that M3's chain-backed signer would want.
+- Killing a daemon needs the flags, not the path: the binaries run from
+  `target/debug`, so `pkill -f "bin/relay"` matches nothing and leaves the
+  daemon alive to race the next run on the same port and store. Match something
+  distinctive such as `relay --listen 127.0.0.1:3100`.
+- A `set -e` trap that cleans up processes needs `|| true` on each `pkill`, or
+  the trap aborts with a non-zero status of its own.
+- The coordinator and frontend are still absent from the compose file: both take
+  host paths (`--web`, `--wasm`, `--dir`) that only make sense from the
+  repository root.

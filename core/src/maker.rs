@@ -25,8 +25,12 @@ pub struct SwapRecord {
     pub id: String,
     pub payment_hash: PaymentHash,
     pub preimage: Preimage,
-    /// What the taker pays over Lightning.
+    /// What the taker receives on chain.
     pub amount_sat: u64,
+    /// What the maker charges for the swap. The taker pays this on top, so the
+    /// Lightning invoice is for `amount_sat + fee_sat` and the taker still nets
+    /// exactly `amount_sat` on chain.
+    pub fee_sat: u64,
     /// What the maker deposits on chain: `amount_sat` plus `claim_fee_sat`.
     pub deposit_sat: u64,
     pub claim_fee_sat: u64,
@@ -91,7 +95,61 @@ pub enum RecordError {
     State(#[from] StateError),
 }
 
+/// The shareable description of a swap.
+///
+/// Everything a taker or a coordinator needs, and nothing else. The preimage
+/// and the refund secret are the maker's alone and must never appear here.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct PublicSwap {
+    pub id: String,
+    pub state: SwapState,
+    /// What the taker receives on chain.
+    pub amount_sat: u64,
+    /// The maker's fee, paid by the taker on top.
+    pub fee_sat: u64,
+    /// What the taker pays over Lightning.
+    pub invoice_sat: u64,
+    pub claim_fee_sat: u64,
+    pub deposit_sat: u64,
+    pub locktime: u32,
+    pub payment_hash: PaymentHash,
+    pub bolt11: String,
+    pub claim_pubkey: String,
+    pub refund_pubkey: String,
+    pub htlc_address: String,
+    pub deposit_txid: Option<String>,
+    pub deposit_vout: Option<u32>,
+    pub refund_txid: Option<String>,
+}
+
 impl SwapRecord {
+    /// What the maker may tell anyone about this swap.
+    pub fn public(&self) -> Result<PublicSwap, RecordError> {
+        Ok(PublicSwap {
+            id: self.id.clone(),
+            state: self.state,
+            amount_sat: self.amount_sat,
+            fee_sat: self.fee_sat,
+            invoice_sat: self.invoice_sat(),
+            claim_fee_sat: self.claim_fee_sat,
+            deposit_sat: self.deposit_sat,
+            locktime: self.locktime,
+            payment_hash: self.payment_hash,
+            bolt11: self.bolt11.clone(),
+            claim_pubkey: self.claim_pubkey.clone(),
+            refund_pubkey: self.refund_pubkey.clone(),
+            htlc_address: self.htlc_address.clone(),
+            deposit_txid: self.funding.as_ref().map(|funding| funding.txid.clone()),
+            deposit_vout: self.funding.as_ref().map(|funding| funding.vout),
+            refund_txid: self.refund_txid()?.map(|txid| txid.to_string()),
+        })
+    }
+
+    /// What the taker pays over Lightning.
+    pub fn invoice_sat(&self) -> u64 {
+        self.amount_sat + self.fee_sat
+    }
+
     fn field<T: FromStr>(&self, name: &'static str, value: &str) -> Result<T, RecordError>
     where
         T::Err: std::fmt::Display,
@@ -257,6 +315,7 @@ mod tests {
             payment_hash: preimage.payment_hash(),
             preimage,
             amount_sat: 30_000,
+            fee_sat: 30,
             deposit_sat: 32_000,
             claim_fee_sat: 2_000,
             refund_fee_sat: 2_000,
@@ -284,6 +343,50 @@ mod tests {
             refund_confirmations: 0,
             invoice,
         }
+    }
+
+    #[test]
+    fn the_public_view_carries_no_secrets() {
+        let mut record = record(500);
+        record.state = SwapState::CounterpartyLocked;
+        record.refund_tx = Some(bitcoin::consensus::encode::serialize_hex(
+            &bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![],
+                output: vec![],
+            },
+        ));
+
+        let public = record.public().unwrap();
+        assert_eq!(public.id, record.id);
+        assert_eq!(public.state, SwapState::CounterpartyLocked);
+        assert_eq!(public.invoice_sat, record.amount_sat + record.fee_sat);
+        assert_eq!(
+            public.deposit_txid.as_deref(),
+            Some(record.funding().unwrap().txid.as_str())
+        );
+        assert!(public.refund_txid.is_some());
+
+        // The whole point of this type: it cannot leak the maker's secrets.
+        let json = serde_json::to_string(&public).unwrap();
+        assert!(!json.contains(&record.preimage.to_hex()), "preimage leaked");
+        assert!(
+            !json.contains(&record.refund_secret),
+            "refund secret leaked"
+        );
+        assert!(!json.contains("preimage"));
+        assert!(!json.contains("secret"));
+    }
+
+    #[test]
+    fn the_invoice_covers_the_payout_and_the_fee() {
+        let record = record(500);
+        assert_eq!(record.amount_sat, 30_000);
+        assert_eq!(record.fee_sat, 30);
+        assert_eq!(record.invoice_sat(), 30_030);
+        // The taker's claim is covered by the deposit, not by the payout.
+        assert_eq!(record.deposit_sat, record.amount_sat + record.claim_fee_sat);
     }
 
     #[test]

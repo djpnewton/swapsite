@@ -27,3 +27,7 @@ path = "src/bin/maker.rs"
 [[bin]]
 name = "relay"
 path = "src/bin/relay.rs"
+
+[[bin]]
+name = "coordinator"
+path = "src/bin/coordinator.rs"

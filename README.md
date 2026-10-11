@@ -11,13 +11,14 @@ and Lightning HTLCs. The coordinator cannot move funds.
 - [docs/plan.md](docs/plan.md) - design, trust model, wallet requirements, roadmap
 - [docs/regtest.md](docs/regtest.md) - local regtest environment (BTC + Lightning)
 - [docs/m1.md](docs/m1.md) - protocol core: HTLC leg, timeouts, state machine
+- [docs/m2.md](docs/m2.md) - coordinator, web UI, the client-side signer
 
 ## Status
 
-M0 through M1d are done. A complete swap runs end to end on regtest: a maker
-daemon that settles and refunds on its own, and a taker that runs in WASM with
-no node, verifying the deposit itself and signing its own claim. Next is the
-coordinator and the web UI.
+M0 through M2 are done. A complete swap runs end to end on regtest: a maker
+daemon that settles and refunds on its own, a taker that runs in WASM with no
+node, and a web page that quotes the swap, verifies the deposit itself, pays and
+claims. Next are the L-BTC legs.
 
 ```bash
 cargo test                       # unit tests, includes real script verification
@@ -27,6 +28,19 @@ docker compose -f docker/docker-compose.yml up -d
 ./scripts/regtest-swap.sh        # one complete swap, both legs, plus the failure path
 ./scripts/regtest-maker.sh       # the daemon: cold-start settle and timed refund
 ./scripts/regtest-wasm.sh        # the browser-side taker, through a relay
+./scripts/regtest-coordinator.sh # the whole flow: quote, verify, pay, claim, recover
+```
+
+To click through the same flow in a browser, start the three services and open
+<http://127.0.0.1:8090/>:
+
+```bash
+target/debug/relay --listen 127.0.0.1:3100 &
+target/debug/maker serve --dir /tmp/swaps --listen 127.0.0.1:3200 &
+target/debug/coordinator serve --listen 127.0.0.1:8090 \
+  --maker-url http://127.0.0.1:3200 --relay-url http://127.0.0.1:3100 \
+  --dir /tmp/records --web web \
+  --wasm target/wasm32-unknown-unknown/release/swapsite_wasm.wasm --dev-pay
 ```
 
 ## Layout
@@ -34,7 +48,7 @@ docker compose -f docker/docker-compose.yml up -d
 | Crate | Contents |
 | ----- | -------- |
 | `core/` | the domain: HTLC, Lightning leg, swap state, maker decision logic. No I/O, so it compiles to WASM. |
-| `adapters/` | the I/O: Bitcoin Core JSON-RPC, `lncli`, swap records on disk. |
-| `cli/` | `swapx` (drive one leg), `maker` (the daemon), `relay` (observe and broadcast). |
+| `adapters/` | the I/O: Bitcoin Core JSON-RPC, `lncli`, swap records on disk, one shared HTTP server and client. |
+| `cli/` | `swapx` (drive one leg), `maker` (the daemon), `relay` (observe and broadcast), `coordinator` (quotes, brokering, static files). |
 | `wasm/` | the taker, compiled to `wasm32-unknown-unknown` with no imports. |
-| `web/` | the JS that loads the module and talks to the relay. |
+| `web/` | the page, and the JS that loads the module and talks to the relay. |
