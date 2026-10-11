@@ -29,6 +29,7 @@ docker compose -f docker/docker-compose.yml up -d
 ./scripts/regtest-maker.sh       # the daemon: cold-start settle and timed refund
 ./scripts/regtest-wasm.sh        # the browser-side taker, through a relay
 ./scripts/regtest-coordinator.sh # the whole flow: quote, verify, pay, claim, recover
+./scripts/regtest-recovery.sh    # a lost page, a deadline, and a maker that reneges
 ```
 
 To click through the same flow in a browser, start the three services and open

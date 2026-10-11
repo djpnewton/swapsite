@@ -58,6 +58,7 @@ function update(id, patch) {
 // --- actions ---------------------------------------------------------------
 
 let quote = null;
+let height = null;
 
 async function askQuote() {
   const amount = Number($("amount").value);
@@ -86,16 +87,112 @@ async function create() {
 }
 
 async function refresh() {
-  for (const id of Object.keys(session.swaps)) {
+  const ids = Object.keys(session.swaps);
+  if (ids.length === 0) return;
+
+  // One height for the whole pass, so two cards cannot disagree about how much
+  // time each one has left.
+  try {
+    height = await chain.height();
+  } catch {
+    // Without a height a deadline cannot be judged, and a guess would be worse
+    // than saying nothing.
+    height = null;
+  }
+
+  for (const id of ids) {
+    const entry = session.swaps[id];
     try {
       const swap = await api(`/swaps/${id}`);
-      if (JSON.stringify(swap) !== JSON.stringify(session.swaps[id].swap)) {
+      if (JSON.stringify(swap) !== JSON.stringify(entry.swap)) {
         update(id, { swap });
       }
     } catch {
       // The coordinator being down is not fatal: the card keeps its last view,
       // and a deposit in hand can still be checked and claimed.
     }
+
+    await checkDepositSpent(id);
+  }
+
+  render();
+  await recoverSwaps();
+}
+
+/**
+ * Ask the chain whether the deposit is still there.
+ *
+ * Worth asking because nothing else knows: the maker's records only follow the
+ * refund it built itself, so a maker that refunds a deposit it was already paid
+ * for leaves no trace anywhere except on chain.
+ */
+async function checkDepositSpent(id) {
+  const entry = session.swaps[id];
+  const { deposit_txid, deposit_vout } = entry.swap ?? {};
+
+  if (!deposit_txid || deposit_vout === null || deposit_vout === undefined) return;
+  if (entry.claimed) return;
+
+  try {
+    const { unspent } = await chain.unspent(`${deposit_txid}:${deposit_vout}`);
+    if (unspent !== entry.deposit_unspent) {
+      update(id, { deposit_unspent: unspent });
+    }
+  } catch {
+    // A relay that cannot answer does not change what we already believe.
+  }
+}
+
+/**
+ * What this taker can still do about a swap.
+ *
+ * Computed here rather than asked for: the deadline is public, the height comes
+ * from the chain, and whether the preimage is in hand is this page's own
+ * knowledge - the part nobody else has.
+ */
+function verdict(id) {
+  const entry = session.swaps[id];
+  const { swap, preimage, claimed } = entry;
+  if (!swap || claimed || height === null) return null;
+
+  return taker.assess({
+    state: swap.state,
+    has_preimage: Boolean(preimage),
+    // Unknown is assumed unspent, so a page that could not reach the relay
+    // still offers the claim rather than calling a recoverable swap dead.
+    deposit_unspent: entry.deposit_unspent !== false,
+    deadline: swap.locktime,
+    height,
+  });
+}
+
+/** Swaps with something left to do, so a returned page can just do it. */
+function outstanding() {
+  return Object.keys(session.swaps)
+    .map((id) => ({ id, recovery: verdict(id) }))
+    .filter(({ recovery }) => recovery?.actionable);
+}
+
+/**
+ * Do whatever a returned tab can do by itself.
+ *
+ * Claiming is unilateral and only ever moves value towards the taker, so it is
+ * safe to do without being asked. It cannot be done without a destination
+ * address, and that is the taker's to name: a page that recovered after a
+ * reload has no address to reuse, so it says so rather than guessing.
+ */
+async function recoverSwaps() {
+  for (const { id, recovery } of outstanding()) {
+    const entry = session.swaps[id];
+    if (entry.busy || entry.claimed || entry.error) continue;
+    if (recovery.action.kind === "find_preimage") continue;
+
+    if (!entry.verified) {
+      await checkDeposit(id);
+      continue;
+    }
+    if (!entry.address) continue;
+    await claim(id, { auto: true });
   }
 }
 
@@ -147,7 +244,7 @@ async function pay(id) {
   }
 }
 
-async function claim(id) {
+async function claim(id, options = {}) {
   const entry = session.swaps[id];
   const { swap, preimage, verified } = entry;
   const address = entry.address?.trim();
@@ -183,7 +280,11 @@ async function claim(id) {
     });
 
     const txid = await chain.broadcast(signed.tx_hex);
-    update(id, { busy: null, claimed: { txid, address: join.address }, error: null });
+    update(id, {
+      busy: null,
+      claimed: { txid, address: join.address, auto: Boolean(options.auto) },
+      error: null,
+    });
   } catch (error) {
     update(id, { busy: null, error: `Claim failed: ${error.message}` });
   }
@@ -201,6 +302,7 @@ function card(id, entry) {
   const { swap, verified, preimage, claimed, error, busy } = entry;
   if (!swap) return "";
 
+  const recovery = verdict(id);
   const rows = [
     `<dt>you receive</dt><dd>${sats(swap.amount_sat)}</dd>`,
     `<dt>you pay</dt><dd>${sats(swap.invoice_sat)} over Lightning</dd>`,
@@ -210,37 +312,44 @@ function card(id, entry) {
     `<dt>htlc</dt><dd>${swap.htlc_address}</dd>`,
     `<dt>refund after</dt><dd>height ${swap.locktime}</dd>`,
   ];
+  if (recovery?.action.blocks_left !== undefined) {
+    rows.push(`<dt>blocks left</dt><dd>${recovery.action.blocks_left}</dd>`);
+  }
   if (preimage) rows.push(`<dt>preimage</dt><dd>${short(preimage, 16, 8)}</dd>`);
   if (claimed) {
     rows.push(`<dt>claimed</dt><dd>${short(claimed.txid)}</dd>`);
   }
 
+  // A spent deposit cannot be claimed, so offering the buttons would only
+  // invite a transaction that is guaranteed to be rejected.
+  const gone = recovery?.action.kind === "gone";
+
   const actions = [];
-  if (!verified) {
-    actions.push(
-      `<button data-act="check" data-id="${id}" ${busy ? "disabled" : ""}>Check the deposit</button>`,
-    );
-  }
-  if (!preimage) {
-    actions.push(
-      `<button data-act="pay" data-id="${id}" class="primary" ${busy ? "disabled" : ""}>Pay ${sats(
-        swap.invoice_sat,
-      )}</button>`,
-    );
-    actions.push(
-      `<button data-act="paste" data-id="${id}">I paid elsewhere</button>`,
-    );
-  } else if (!claimed) {
-    actions.push(
-      `<input data-addr="${id}" placeholder="address to receive" value="${
-        entry.address ?? ""
-      }" />`,
-    );
-    actions.push(
-      `<button data-act="claim" data-id="${id}" class="primary" ${busy ? "disabled" : ""}>Claim ${
-        verified ? sats(verified.sats - swap.claim_fee_sat) : "on chain"
-      }</button>`,
-    );
+  if (!gone) {
+    if (!verified) {
+      actions.push(
+        `<button data-act="check" data-id="${id}" ${busy ? "disabled" : ""}>Check the deposit</button>`,
+      );
+    }
+    if (!preimage) {
+      actions.push(
+        `<button data-act="pay" data-id="${id}" class="primary" ${busy ? "disabled" : ""}>Pay ${sats(
+          swap.invoice_sat,
+        )}</button>`,
+      );
+      actions.push(`<button data-act="paste" data-id="${id}">I paid elsewhere</button>`);
+    } else if (!claimed) {
+      actions.push(
+        `<input data-addr="${id}" placeholder="address to receive" value="${
+          entry.address ?? ""
+        }" />`,
+      );
+      actions.push(
+        `<button data-act="claim" data-id="${id}" class="primary" ${busy ? "disabled" : ""}>Claim ${
+          verified ? sats(verified.sats - swap.claim_fee_sat) : "on chain"
+        }</button>`,
+      );
+    }
   }
 
   return `
@@ -252,14 +361,53 @@ function card(id, entry) {
       <dl>${rows.join("")}</dl>
       <div class="actions">${actions.join("")}</div>
       ${busy ? `<p class="quote">${busy}…</p>` : ""}
-      ${claimed ? `<p class="ok">Claimed in ${short(claimed.txid)}. That is the swap done.</p>` : ""}
+      ${notice(recovery)}
+      ${
+        claimed
+          ? `<p class="ok">Claimed${claimed.auto ? " automatically" : ""} in ${short(
+              claimed.txid,
+            )}. That is the swap done.</p>`
+          : ""
+      }
       ${error ? `<p class="error">${error}</p>` : ""}
     </article>`;
 }
 
+/** The one line that says whether this swap needs the taker right now. */
+function notice(recovery) {
+  if (!recovery) return "";
+  const { action, deadline, urgent } = recovery;
+
+  switch (action.kind) {
+    case "claim":
+      return urgent
+        ? `<p class="error urgent">Act now: ${action.blocks_left} blocks left before the maker is allowed to refund this deposit.</p>`
+        : `<p class="quote">${action.blocks_left} blocks to claim. Until then the maker cannot touch the deposit.</p>`;
+    case "racing":
+      return `<p class="error urgent">The refund path is open, so the maker can take this deposit back at any moment. Claim now - a claim still wins, but only if it gets there first.</p>`;
+    case "find_preimage":
+      return `<p class="error${urgent ? " urgent" : ""}">Your payment settled, so the preimage is public, but this page does not have it. Paste it from the wallet that paid, before height ${deadline}.</p>`;
+    case "gone":
+      return `<p class="error">This deposit has been spent, so there is no longer anything to claim. If you claimed it yourself, your coins are at the address you named. If you did not, the maker refunded it and the payment you made went with it.</p>`;
+    default:
+      return "";
+  }
+}
+
+let lastMarkup = "";
+
 function render() {
   const ids = Object.keys(session.swaps).reverse();
-  $("swaps").innerHTML = ids.map((id) => card(id, session.swaps[id])).join("");
+  const markup = ids.map((id) => card(id, session.swaps[id])).join("");
+
+  // Only touch the DOM when the markup actually changed. A poll runs every few
+  // seconds, and replacing the list each time would take the cursor out of the
+  // address field the taker is in the middle of typing into.
+  if (markup !== lastMarkup) {
+    lastMarkup = markup;
+    $("swaps").innerHTML = markup;
+  }
+
   $("foot").textContent =
     `key ${short(session.key.pubkey, 12, 6)} · relay ${config.relay_url} · ` +
     `${config.dev_pay ? "dev pay is on" : "pay from your own wallet"}`;
@@ -314,4 +462,7 @@ async function recover() {
 render();
 askQuote().catch(() => {});
 await recover();
+// A returned tab with a preimage in hand claims without being asked: waiting
+// for the taker to notice a countdown is how a swap gets lost.
+await recoverSwaps();
 setInterval(refresh, 3000);

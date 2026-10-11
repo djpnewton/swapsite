@@ -179,6 +179,18 @@ Registry of decisions:
 - **Nothing dev-only is on by default.** The endpoint that pays a taker's invoice
   on its behalf is behind `--dev-pay`, because using it means the coordinator
   learns a preimage it would never see in production.
+- **Recovery is a verdict, not a service.** Nobody can claim for the taker, so
+  what the taker gets is a judgement - drawn from its own preimage, the chain,
+  and the HTLC's own locktime - of whether a move is left. The page acts on it
+  without asking, because a claim only ever moves value towards the taker.
+- **Passing a deadline is a race, not a loss.** The hashlock path is not
+  timelocked, so a claim is valid at any height and the deadline only opens the
+  maker's refund. A verdict that called that "lost" would be wrong, and wrong in
+  the direction that makes a taker give up on money that is still theirs.
+- **The taker checks the deposit itself.** The maker's records only follow the
+  refund the maker built, so a refund from anywhere else is invisible off-chain.
+  That is why the relay grew an unspent-output query rather than the coordinator
+  growing an opinion.
 - **Split the client JS by dependency, not by audience.** The page and the shell
   drive the same code, but only one of them can import `node:fs`; a shared file
   that imported it made the browser refuse the module outright.

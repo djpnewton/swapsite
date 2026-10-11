@@ -64,6 +64,8 @@ export function takerFrom(instance) {
     htlcAddress: (params) => call({ op: "htlc_address", ...params }),
     findOutput: (params) => call({ op: "find_output", ...params }),
     checkJoin: (params) => call({ op: "check_join", ...params }),
+    /** What this taker can still do about a swap, and how long it has. */
+    assess: (params) => call({ op: "assess", ...params }),
     claim: (params) => call({ op: "claim", ...params }),
     refund: (params) => call({ op: "refund", ...params }),
   };

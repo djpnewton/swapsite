@@ -4,16 +4,17 @@
 //! exactly that and nothing else:
 //!
 //! ```text
-//! GET  /height        -> {"height": N}
-//! GET  /tx/<txid>     -> {"txid", "confirmations", "hex"}
-//! POST /tx            -> {"txid"}      (body is raw transaction hex)
+//! GET  /height          -> {"height": N}
+//! GET  /tx/<txid>       -> {"txid", "confirmations", "hex"}
+//! GET  /utxo/<txid>:<vout> -> {"unspent": bool, "sats": N|null}
+//! POST /tx              -> {"txid"}      (body is raw transaction hex)
 //! ```
 //!
 //! A relay can lie about what it sees and can refuse to broadcast, but it cannot
 //! take funds: the taker checks the deposit script itself and signs its own
 //! transaction with a key the relay never sees.
 //!
-//! Deliberately tiny: the shared local HTTP server, and three routes.
+//! Deliberately tiny: the shared local HTTP server, and four routes.
 
 use std::str::FromStr;
 
@@ -45,11 +46,14 @@ struct Cli {
     network: String,
 }
 
-/// The three node operations the relay exposes. A trait so the routing can be
-/// tested without a node.
+/// The node operations the relay exposes. A trait so the routing can be tested
+/// without a node.
 trait Node: Send + Sync {
     fn height(&self) -> std::result::Result<u32, String>;
     fn transaction(&self, txid: &Txid) -> std::result::Result<Option<RawTransaction>, String>;
+    /// What an output is worth while it is still unspent, and `None` once it
+    /// has been spent.
+    fn unspent(&self, txid: &Txid, vout: u32) -> std::result::Result<Option<u64>, String>;
     fn broadcast(&self, tx: &Transaction) -> std::result::Result<Txid, String>;
 }
 
@@ -60,6 +64,12 @@ impl Node for BitcoinRpc {
 
     fn transaction(&self, txid: &Txid) -> std::result::Result<Option<RawTransaction>, String> {
         BitcoinRpc::transaction(self, txid).map_err(|e| e.to_string())
+    }
+
+    fn unspent(&self, txid: &Txid, vout: u32) -> std::result::Result<Option<u64>, String> {
+        BitcoinRpc::outspent(self, txid, vout)
+            .map(|found| found.map(|amount| amount.to_sat()))
+            .map_err(|e| e.to_string())
     }
 
     fn broadcast(&self, tx: &Transaction) -> std::result::Result<Txid, String> {
@@ -98,6 +108,27 @@ fn route(node: &dyn Node, request: &Request) -> Response {
                 Ok(None) => Response::error(404, "unknown transaction"),
                 Err(e) => Response::json(502, &json!({ "error": e })),
             },
+        };
+    }
+
+    if let Some(captures) = request.matches("GET", "/utxo/:outpoint") {
+        let Some((txid, vout)) = captures[0].split_once(':') else {
+            return Response::error(400, "an outpoint looks like <txid>:<vout>");
+        };
+
+        let txid = match Txid::from_str(txid) {
+            Ok(txid) => txid,
+            Err(e) => return Response::error(400, format!("bad txid: {e}")),
+        };
+        let vout = match vout.parse::<u32>() {
+            Ok(vout) => vout,
+            Err(e) => return Response::error(400, format!("bad vout: {e}")),
+        };
+
+        return match node.unspent(&txid, vout) {
+            Ok(Some(sats)) => Response::json(200, &json!({ "unspent": true, "sats": sats })),
+            Ok(None) => Response::json(200, &json!({ "unspent": false, "sats": null })),
+            Err(e) => Response::json(502, &json!({ "error": e })),
         };
     }
 
@@ -140,6 +171,8 @@ mod tests {
     struct FakeNode {
         height: u32,
         transactions: Vec<(Txid, RawTransaction)>,
+        /// Outpoints that are still unspent, with what they hold.
+        unspent: Vec<((Txid, u32), u64)>,
         broadcast: Mutex<Vec<Txid>>,
         fail_broadcast: bool,
     }
@@ -155,6 +188,14 @@ mod tests {
                 .iter()
                 .find(|(id, _)| id == txid)
                 .map(|(_, tx)| tx.clone()))
+        }
+
+        fn unspent(&self, txid: &Txid, vout: u32) -> std::result::Result<Option<u64>, String> {
+            Ok(self
+                .unspent
+                .iter()
+                .find(|((id, n), _)| id == txid && *n == vout)
+                .map(|(_, sats)| *sats))
         }
 
         fn broadcast(&self, tx: &Transaction) -> std::result::Result<Txid, String> {
@@ -272,6 +313,49 @@ mod tests {
         let node = FakeNode::default();
         let response = route(&node, &get("/tx/not-a-txid"));
         assert_eq!(response.status, 400);
+    }
+
+    #[test]
+    fn reports_an_unspent_outpoint_and_its_value() {
+        let txid = sample_tx().compute_txid();
+        let node = FakeNode {
+            unspent: vec![((txid, 1), 32_000)],
+            ..FakeNode::default()
+        };
+
+        let response = route(&node, &get(&format!("/utxo/{txid}:1")));
+        assert_eq!(response.status, 200);
+        let body = body_of(response);
+        assert_eq!(body["unspent"], true);
+        assert_eq!(body["sats"], 32_000);
+    }
+
+    #[test]
+    fn a_spent_outpoint_is_not_an_error() {
+        // Spent and never-existed are the same answer from `gettxout`, and the
+        // same answer here: it is not there. Asking about it is not a mistake.
+        let txid = sample_tx().compute_txid();
+        let node = FakeNode {
+            unspent: vec![((txid, 1), 32_000)],
+            ..FakeNode::default()
+        };
+
+        let response = route(&node, &get(&format!("/utxo/{txid}:0")));
+        assert_eq!(response.status, 200);
+        let body = body_of(response);
+        assert_eq!(body["unspent"], false);
+        assert_eq!(body["sats"], Value::Null);
+    }
+
+    #[test]
+    fn an_outpoint_needs_both_halves() {
+        let node = FakeNode::default();
+        let response = route(&node, &get("/utxo/nonsense"));
+        assert_eq!(response.status, 400);
+        assert!(body_of(response)["error"]
+            .as_str()
+            .unwrap()
+            .contains("outpoint"));
     }
 
     #[test]

@@ -83,6 +83,22 @@ impl BitcoinRpc {
         }
     }
 
+    /// What an output is worth if it is still there, and `None` if it is not.
+    ///
+    /// `gettxout` answers null for an output that has been spent and for one
+    /// that never existed. Both mean the same thing to a caller: it is not
+    /// there to be spent.
+    pub fn outspent(&self, txid: &Txid, vout: u32) -> Result<Option<Amount>, ChainError> {
+        let out: Option<Value> = self.call("gettxout", json!([txid.to_string(), vout, true]))?;
+
+        let Some(out) = out else { return Ok(None) };
+
+        let btc = out.get("value").and_then(Value::as_f64).unwrap_or(0.0);
+        Amount::from_btc(btc)
+            .map(Some)
+            .map_err(|e| ChainError::Rpc(format!("gettxout reported {btc} BTC: {e}")))
+    }
+
     fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T, ChainError> {
         let request = json!({
             "jsonrpc": "1.0",

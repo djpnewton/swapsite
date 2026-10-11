@@ -22,7 +22,10 @@ use serde_json::{json, Value};
 use swapsite_core::{
     hash::{PaymentHash, Preimage},
     htlc::Htlc,
+    recovery::Recovery,
+    recovery::TakerView,
     spend,
+    state::SwapState,
 };
 
 /// One request from the page. Tagged so the wire format reads on its own.
@@ -100,6 +103,23 @@ enum Request {
         #[serde(default = "default_network")]
         network: String,
     },
+
+    /// What the taker can still do about a swap, and how long it has left.
+    ///
+    /// Everything this needs is public except `has_preimage`, which is the
+    /// taker's own knowledge - so the verdict is computed here rather than
+    /// asked of the coordinator, which never learns the secret anyway.
+    Assess {
+        state: String,
+        has_preimage: bool,
+        /// Whether the deposit output is still there. Defaults to yes: being
+        /// wrong that way costs a failed transaction, while being wrong the
+        /// other way tells a taker to give up on a swap that is still theirs.
+        #[serde(default = "default_true")]
+        deposit_unspent: bool,
+        deadline: u32,
+        height: u32,
+    },
 }
 
 fn default_network() -> String {
@@ -108,6 +128,10 @@ fn default_network() -> String {
 
 fn default_fee() -> u64 {
     1_000
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Run one request and return a JSON response.
@@ -202,6 +226,23 @@ fn dispatch_request(input: &str) -> Result<Value, String> {
                 // swap cannot pass the check and then be claimed by mistake.
                 "address": htlc.address(parse_network(&network)?).to_string(),
             }))
+        }
+
+        Request::Assess {
+            state,
+            has_preimage,
+            deposit_unspent,
+            deadline,
+            height,
+        } => {
+            let view = TakerView {
+                state: parse_state(&state)?,
+                has_preimage,
+                deposit_unspent,
+                deadline,
+                height,
+            };
+            serde_json::to_value(Recovery::assess(view)).map_err(|e| e.to_string())
         }
 
         Request::Claim {
@@ -324,6 +365,12 @@ fn htlc_from_key(
         locktime,
     )
     .map_err(|e| e.to_string())
+}
+
+fn parse_state(name: &str) -> Result<SwapState, String> {
+    // Serde is the single source of truth for the wire spelling.
+    serde_json::from_value(Value::String(name.to_owned()))
+        .map_err(|_| format!("unknown swap state `{name}`"))
 }
 
 fn secret(hex: &str) -> Result<SecretKey, String> {
@@ -499,6 +546,143 @@ mod tests {
         let value: Value = serde_json::from_str(&response).unwrap();
         assert!(
             value["error"].as_str().unwrap().contains("does not unlock"),
+            "got {response}"
+        );
+    }
+
+    #[test]
+    fn the_taker_asks_itself_what_is_left() {
+        let out = json_round_trip(json!({
+            "op": "assess",
+            "state": "settled",
+            "has_preimage": true,
+            "deadline": 506,
+            "height": 500,
+        }));
+
+        assert_eq!(out["action"]["kind"], "claim");
+        assert_eq!(out["action"]["blocks_left"], 6);
+        assert_eq!(out["deadline"], 506);
+        assert_eq!(out["height"], 500);
+        assert_eq!(out["urgent"], true);
+    }
+
+    #[test]
+    fn a_taker_missing_its_preimage_is_told_to_find_it() {
+        // Settled, paid for, and this page cannot claim it yet. Not an error,
+        // and not urgent until the deadline is near.
+        let out = json_round_trip(json!({
+            "op": "assess",
+            "state": "settled",
+            "has_preimage": false,
+            "deadline": 506,
+            "height": 400,
+        }));
+
+        assert_eq!(out["action"]["kind"], "find_preimage");
+        assert_eq!(out["action"]["blocks_left"], 106);
+        assert_eq!(out["urgent"], false);
+    }
+
+    #[test]
+    fn past_the_deadline_the_verdict_is_a_race() {
+        let out = json_round_trip(json!({
+            "op": "assess",
+            "state": "settled",
+            "has_preimage": true,
+            "deadline": 506,
+            "height": 510,
+        }));
+
+        assert_eq!(out["action"]["kind"], "racing");
+        assert_eq!(out["action"]["blocks_since"], 4);
+        assert_eq!(out["urgent"], true);
+    }
+
+    #[test]
+    fn a_spent_deposit_ends_it_even_before_the_deadline() {
+        // The case the coordinator cannot see: a maker that refunds a swap it
+        // was already paid for, so no record anywhere says `refunded`.
+        let out = json_round_trip(json!({
+            "op": "assess",
+            "state": "settled",
+            "has_preimage": true,
+            "deposit_unspent": false,
+            "deadline": 506,
+            "height": 480,
+        }));
+
+        assert_eq!(out["action"]["kind"], "gone");
+        assert_eq!(out["urgent"], false);
+    }
+
+    #[test]
+    fn an_unasked_deposit_is_assumed_to_be_there() {
+        // Optimistic on purpose: a caller that has not checked must not be told
+        // to abandon a swap.
+        let out = json_round_trip(json!({
+            "op": "assess",
+            "state": "settled",
+            "has_preimage": true,
+            "deadline": 506,
+            "height": 480,
+        }));
+
+        assert_eq!(out["action"]["kind"], "claim");
+    }
+
+    #[test]
+    fn the_verdict_carries_every_field_the_page_reads() {
+        // Nothing type-checks across the JSON boundary, so a field that is
+        // renamed, or one left as a Rust method that never crosses at all,
+        // breaks the page silently.
+        let out = json_round_trip(json!({
+            "op": "assess",
+            "state": "settled",
+            "has_preimage": true,
+            "deadline": 506,
+            "height": 480,
+        }));
+
+        for key in ["action", "deadline", "height", "urgent", "actionable"] {
+            assert!(out.get(key).is_some(), "the verdict has no `{key}`: {out}");
+        }
+        assert_eq!(out["actionable"], true);
+    }
+
+    #[test]
+    fn a_claim_that_is_merely_waiting_is_not_actionable() {
+        let out = json_round_trip(json!({
+            "op": "assess",
+            "state": "initiator_funded",
+            "has_preimage": false,
+            "deadline": 506,
+            "height": 400,
+        }));
+
+        assert_eq!(out["action"]["kind"], "wait_for_payment");
+        assert_eq!(out["actionable"], false);
+    }
+
+    #[test]
+    fn an_unknown_state_is_an_error_and_not_a_default() {
+        let response = handle(
+            &json!({
+                "op": "assess",
+                "state": "wandering",
+                "has_preimage": true,
+                "deadline": 506,
+                "height": 500,
+            })
+            .to_string(),
+        );
+
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value["error"]
+                .as_str()
+                .unwrap()
+                .contains("unknown swap state"),
             "got {response}"
         );
     }

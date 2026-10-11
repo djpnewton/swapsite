@@ -173,6 +173,13 @@ dd {
   font-size: 0.9rem;
 }
 
+/* A deadline that is close enough to lose money by missing. */
+.urgent {
+  border-left: 3px solid var(--bad);
+  padding-left: 0.6rem;
+  font-weight: 600;
+}
+
 .ok {
   color: var(--good);
   margin: 0.5rem 0 0;

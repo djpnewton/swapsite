@@ -217,19 +217,38 @@ impl Service {
     }
 
     /// Every swap this taker has started, so a returned page can pick them up.
+    ///
+    /// Each one is refreshed from the maker first. A record written at creation
+    /// says `created` forever otherwise, and a taker's verdict leans on the
+    /// state: a settled swap with no preimage means "go and find it", which
+    /// `created` would hide behind "the maker has not funded yet".
     fn list(&self, request: &Request) -> Response {
         let wanted = request.query("claim_pubkey");
 
-        match self.load_all() {
-            Ok(swaps) => {
-                let swaps: Vec<PublicSwap> = swaps
-                    .into_iter()
-                    .filter(|swap| wanted.is_none_or(|wanted| swap.claim_pubkey == wanted))
-                    .collect();
-                Response::json(200, &json!({ "swaps": swaps }))
-            }
-            Err(e) => Response::error(500, e.to_string()),
+        let recorded = match self.load_all() {
+            Ok(swaps) => swaps,
+            Err(e) => return Response::error(500, e.to_string()),
+        };
+
+        let swaps: Vec<PublicSwap> = recorded
+            .into_iter()
+            .filter(|swap| wanted.is_none_or(|wanted| swap.claim_pubkey == wanted))
+            .map(|swap| self.fresh(&swap.id).unwrap_or(swap))
+            .collect();
+
+        Response::json(200, &json!({ "swaps": swaps }))
+    }
+
+    /// The maker's view of a swap, if it can be had. Anything learned is saved.
+    fn fresh(&self, id: &str) -> Option<PublicSwap> {
+        let response = fetch("GET", &format!("{}/swaps/{id}", self.maker_url), None).ok()?;
+        if response.status != 200 {
+            return None;
         }
+
+        let swap: PublicSwap = serde_json::from_str(&response.body).ok()?;
+        let _ = self.save(&swap);
+        Some(swap)
     }
 
     fn create(&self, request: &Request) -> Response {
@@ -269,13 +288,8 @@ impl Service {
 
     fn show(&self, id: &str) -> Response {
         // The maker's view is the truth when it is reachable.
-        if let Ok(response) = fetch("GET", &format!("{}/swaps/{id}", self.maker_url), None) {
-            if response.status == 200 {
-                if let Ok(swap) = serde_json::from_str::<PublicSwap>(&response.body) {
-                    let _ = self.save(&swap);
-                    return Response::json(200, &json!(swap));
-                }
-            }
+        if let Some(swap) = self.fresh(id) {
+            return Response::json(200, &json!(swap));
         }
 
         match self.load(id) {

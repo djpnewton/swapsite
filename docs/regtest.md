@@ -163,8 +163,26 @@ wallet until the claim, which it signs itself. `--dev-pay` pays the taker's
 invoice from the taker's own node so the flow can be driven without a second
 wallet; without it the page shows an invoice for the user to pay.
 
-`scripts/regtest-coordinator.sh` runs the same flow over HTTP, from the shell.
-Do not run it while these three are up: it wants the same ports.
+Close the tab after paying and reopen it before the deposit's locktime: the page
+finds the swap, counts the blocks it has left, and claims it without being asked
+as long as it remembers a destination address. Mine up to the locktime instead
+and the warning turns into a race.
+
+`scripts/regtest-coordinator.sh` and `scripts/regtest-recovery.sh` run the same
+flows over HTTP, from the shell. Do not run them while these three are up: they
+want the same ports.
+
+## The relay's endpoints
+
+```text
+GET  /height              {"height": N}
+GET  /tx/<txid>           {"txid", "confirmations", "hex"}
+GET  /utxo/<txid>:<vout>  {"unspent": bool, "sats": N|null}
+POST /tx                  {"txid"}   body is raw transaction hex
+```
+
+`/utxo` is how a taker notices its deposit has been taken without believing
+anyone: the maker's own records cannot see a refund the maker did not build.
 
 ## Notes and gotchas
 

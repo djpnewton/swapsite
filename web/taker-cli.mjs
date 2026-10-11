@@ -6,7 +6,6 @@
 //
 //   SWAPSITE_WASM=... SWAPSITE_RELAY=http://127.0.0.1:3100 \
 //     node web/taker-cli.mjs keypair
-
 import { argv, env, exit } from "node:process";
 
 import { relay } from "./relay.mjs";
@@ -105,6 +104,36 @@ try {
       break;
     }
 
+    case "assess": {
+      // The deadline is the HTLC's own locktime, and the height comes from the
+      // chain rather than from the caller, so the two cannot disagree. Same for
+      // the deposit: the taker asks the relay whether it is still there instead
+      // of taking anyone's word for it.
+      const preimage = flags.preimage;
+      let deposit_unspent = true;
+      if (flags.outpoint) {
+        deposit_unspent = (await chain.unspent(flags.outpoint)).unspent;
+      }
+
+      const recovery = taker.assess({
+        state: need(flags, "state"),
+        has_preimage: preimage !== undefined && preimage !== "",
+        deposit_unspent,
+        deadline: Number(need(flags, "locktime")),
+        height: Number(flags.height ?? (await chain.height())),
+      });
+      emit({
+        action: recovery.action.kind,
+        blocks_left: recovery.action.blocks_left ?? "",
+        blocks_since: recovery.action.blocks_since ?? "",
+        deadline: recovery.deadline,
+        height: recovery.height,
+        deposit_unspent,
+        urgent: recovery.urgent,
+      });
+      break;
+    }
+
     case "claim": {
       // No `claim_pubkey` here: the claimant is the owner of `claim-key`, and
       // the wasm module derives the pubkey from it.
@@ -129,7 +158,9 @@ try {
     }
 
     default:
-      throw new Error("usage: taker-cli.mjs <keypair|height|verify-deposit|check-join|claim|broadcast>");
+      throw new Error(
+        "usage: taker-cli.mjs <keypair|height|verify-deposit|check-join|assess|claim|broadcast>",
+      );
   }
 } catch (error) {
   console.error(`taker: ${error.message}`);
