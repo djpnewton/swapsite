@@ -162,7 +162,7 @@ flowchart LR
 | M1a | On-chain HTLC leg: script builder, spends, timelock invariant, state machine. | done, see [m1.md](m1.md) |
 | M1b | Lightning leg: HODL invoices, hold/settle, joined to the on-chain leg. | done, see [m1.md](m1.md) |
 | M1c | Maker daemon: watch both legs, drive the machine, automate refunds. | done, see [m1.md](m1.md) |
-| M1d | WASM taker signer plus chain observation and broadcast relay. | not started |
+| M1d | WASM taker signer plus chain observation and broadcast relay. | done, see [m1.md](m1.md) |
 | M2 | Coordinator + web UI: quotes, single-maker order book, swap lifecycle, recovery page. | not started |
 | M3 | L-BTC legs: elements regtest, LWK signer. L-BTC <-> LN falls out of M1. | not started |
 | M4 | BTC <-> L-BTC direct: two on-chain legs, no LN, chain-aware margins. | not started |
@@ -172,8 +172,10 @@ Registry of decisions:
 
 - Start with **BTC <-> LN only** (M1). It exercises every mechanism that the
   other pairs reuse.
-- **M1d (next).** The WASM taker signer, plus the chain observation and
-  broadcast relay a taker needs.
+- **M2 (next).** The coordinator and the web UI: quotes, a single-maker order
+  book, swap lifecycle, recovery.
+- **M1d done:** the taker runs in wasm with zero imports, verifies the deposit
+  itself and signs its own claim; a relay only reads the chain and broadcasts.
 - **M1c done:** the maker daemon settles and refunds swaps on its own, from
   observed reality, and survives being restarted mid-swap.
 - **M1b done:** one swap now completes end to end on regtest. The maker holds an
@@ -190,6 +192,11 @@ Registry of decisions:
   mid-swap must be able to finish or undo the swap from disk alone.
 - **Observed reality wins over the local record.** Recovery adopts terminal
   states seen on-chain or on Lightning, and can never adopt a non-terminal one.
+- **The taker gets entropy from the page, not from the module.** `rand` is a
+  feature of the domain crate, off in the wasm build, so the module imports
+  nothing and needs no toolchain beyond `rustup target add wasm32-unknown-unknown`.
+- **A relay is only a relay.** It observes and broadcasts. It is never asked to
+  be trusted: the taker checks the deposit script and signs its own spend.
 - **Heights only for refund timeouts.** Time-based locktimes are rejected when a
   swap is constructed.
 

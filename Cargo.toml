@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "adapters", "cli"]
+members = ["core", "adapters", "cli", "wasm"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,7 +8,7 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-bitcoin = { version = "0.32", features = ["rand-std", "serde"] }
+bitcoin = { version = "0.32", features = ["serde"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

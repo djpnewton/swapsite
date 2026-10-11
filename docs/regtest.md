@@ -57,9 +57,17 @@ To run the maker daemon end to end (a cold-start settle, and a timed refund):
 ./scripts/regtest-maker.sh
 ```
 
-All three scripts source `scripts/lib.sh`, which builds the binaries once and
-needs `cargo` and `python3`. `regtest-maker.sh` kills any daemon left over from
-an earlier run before it starts.
+To run the browser-side taker, which uses WASM for everything cryptographic and
+a relay only to observe and broadcast:
+
+```bash
+./scripts/regtest-wasm.sh
+```
+
+All four scripts source `scripts/lib.sh`, which builds the binaries once and
+needs `cargo` and `python3`; `regtest-wasm.sh` also needs `node` and the
+`wasm32-unknown-unknown` target. `regtest-maker.sh` and `regtest-wasm.sh` kill
+any daemon or relay left over from an earlier run before they start.
 
 Each swap moves real balance from the taker to the maker over Lightning, so a
 long series of runs drains the taker's outbound capacity. The scripts refuse to

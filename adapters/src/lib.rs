@@ -9,6 +9,6 @@ pub mod bitcoind;
 pub mod lncli;
 pub mod store;
 
-pub use bitcoind::BitcoinRpc;
+pub use bitcoind::{BitcoinRpc, RawTransaction};
 pub use lncli::LnCli;
 pub use store::SwapStore;

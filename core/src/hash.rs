@@ -27,6 +27,7 @@ pub struct Preimage([u8; 32]);
 
 impl Preimage {
     /// Fresh random preimage from the OS CSPRNG.
+    #[cfg(feature = "rand")]
     pub fn generate() -> Self {
         use bitcoin::secp256k1::rand::RngCore;
         let mut bytes = [0u8; 32];

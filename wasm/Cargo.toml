@@ -1,0 +1,20 @@
+[package]
+name = "swapsite-wasm"
+description = "The taker side, compiled for the browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# No default features: `rand` would pull in `getrandom`, which on
+# wasm32-unknown-unknown drags in `wasm-bindgen` and needs its JS shim. With it
+# off the module has no imports at all and is loaded with plain
+# `WebAssembly.instantiate`.
+swapsite-core = { path = "../core", default-features = false }
+bitcoin.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true

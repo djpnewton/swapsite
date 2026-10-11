@@ -14,6 +14,15 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use swapsite_core::chain::{Chain, ChainError};
 
+/// A raw transaction as the node sees it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RawTransaction {
+    pub confirmations: u32,
+    /// Serialized transaction, hex.
+    pub hex: String,
+}
+
+#[derive(Clone)]
 pub struct BitcoinRpc {
     host: String,
     port: u16,
@@ -52,6 +61,26 @@ impl BitcoinRpc {
             auth: base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes()),
             network,
         })
+    }
+
+    /// Fetch a transaction by id. `None` when the node has never seen it.
+    pub fn transaction(&self, txid: &Txid) -> Result<Option<RawTransaction>, ChainError> {
+        match self.call::<Value>("getrawtransaction", json!([txid.to_string(), true])) {
+            Ok(value) => Ok(Some(RawTransaction {
+                confirmations: value
+                    .get("confirmations")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as u32,
+                hex: value
+                    .get("hex")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            })),
+            // -5 is Core's "no such mempool or blockchain transaction".
+            Err(ChainError::Node { code: -5, .. }) => Ok(None),
+            Err(other) => Err(other),
+        }
     }
 
     fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T, ChainError> {
@@ -128,16 +157,10 @@ impl Chain for BitcoinRpc {
     }
 
     fn confirmations(&self, txid: &Txid) -> Result<u32, ChainError> {
-        match self.call::<Value>("getrawtransaction", json!([txid.to_string(), true])) {
-            Ok(value) => Ok(value
-                .get("confirmations")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u32),
-            // -5 is Core's "no such mempool or blockchain transaction", which
-            // for a deposit we just broadcast simply means zero confirmations.
-            Err(ChainError::Node { code: -5, .. }) => Ok(0),
-            Err(other) => Err(other),
-        }
+        Ok(self
+            .transaction(txid)?
+            .map(|tx| tx.confirmations)
+            .unwrap_or(0))
     }
 
     fn broadcast(&self, tx: &Transaction) -> Result<Txid, ChainError> {

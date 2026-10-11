@@ -23,3 +23,7 @@ path = "src/bin/swapx.rs"
 [[bin]]
 name = "maker"
 path = "src/bin/maker.rs"
+
+[[bin]]
+name = "relay"
+path = "src/bin/relay.rs"

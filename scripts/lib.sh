@@ -11,13 +11,18 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 COMPOSE=(docker compose -f docker/docker-compose.yml)
 BTC=("${COMPOSE[@]}" exec -T bitcoind bitcoin-cli -regtest \
   -rpcuser=bitcoin -rpcpassword=bitcoin -rpcwallet=swap)
-SWAPX=(cargo run --quiet --bin swapx --)
 
 WORK="${TMPDIR:-/tmp}/swapsite-regtest"
 mkdir -p "$WORK"
+BIN="${CARGO_TARGET_DIR:-target}/debug"
+
+# Build once and call the binaries directly. A background daemon started with
+# `cargo run` would hold the build lock and deadlock every other invocation.
+cargo build --quiet --bin swapx --bin maker --bin relay
 
 btc() { "${BTC[@]}" "$@"; }
-swapx() { "${SWAPX[@]}" "$@"; }
+swapx() { "$BIN/swapx" "$@"; }
+maker() { "$BIN/maker" "$@"; }
 
 # Extract `key=value` from swapx's key=value output.
 field() { sed -n "s/^$1=//p" | head -1; }
@@ -84,6 +89,18 @@ require_outbound() {
 fail() {
   echo "FAIL: $*" >&2
   exit 1
+}
+
+# Poll a swap record until it reaches `wanted`.
+await_swap_state() {
+  local id="$1" wanted="$2" store="$3" state=""
+  for _ in $(seq 1 40); do
+    state=$(maker status --dir "$store" --id "$id" 2>/dev/null | field state) || true
+    [ "$state" = "$wanted" ] && { echo "$state"; return 0; }
+    sleep 1
+  done
+  echo "$state"
+  return 1
 }
 
 # Poll the maker's view of an invoice until it reaches `wanted`.

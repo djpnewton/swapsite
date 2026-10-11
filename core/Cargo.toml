@@ -12,6 +12,13 @@ serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
 
+[features]
+default = ["rand"]
+# Generating a key or a preimage needs an entropy source. A browser has none
+# inside a wasm module, so the WASM build turns this off and takes entropy from
+# the page instead.
+rand = ["bitcoin/rand-std"]
+
 [dev-dependencies]
 # Runs the real Bitcoin script interpreter over our spends in unit tests.
 # Version tracks libbitcoinconsensus (0.106 == Core 26.0), not rust-bitcoin.
