@@ -2,7 +2,7 @@
 #
 #   ./scripts/test.sh             cargo test, the wasm module builds, and the
 #                                 page's javascript tests
-#   ./scripts/test.sh --regtest   the above, then the seven regtest scripts
+#   ./scripts/test.sh --regtest   the above, then the eight regtest scripts
 #
 # The regtest scripts drive the docker stack and depend on each other's order
 # (init funds the network the rest assume), so they are run one at a time.
@@ -55,6 +55,7 @@ if [ "$regtest" = 1 ]; then
   scripts=(
     regtest-init
     regtest-onchain
+    regtest-submarine
     regtest-swap
     regtest-maker
     regtest-wasm

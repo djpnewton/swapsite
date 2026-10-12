@@ -78,7 +78,14 @@ down to the block, and a maker that refunds a deposit it was already paid for:
 ./scripts/regtest-recovery.sh
 ```
 
-All six scripts source `scripts/lib.sh`, which builds the binaries once and
+To run the other direction, where the taker deposits on chain first and the
+maker pays its invoice over Lightning, with no bond in that direction:
+
+```bash
+./scripts/regtest-submarine.sh
+```
+
+All eight scripts source `scripts/lib.sh`, which builds the binaries once and
 needs `cargo`, `python3` and a running compose stack; `regtest-wasm.sh`,
 `regtest-coordinator.sh` and `regtest-recovery.sh` also need `node` and the
 `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`).

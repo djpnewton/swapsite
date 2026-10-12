@@ -1,13 +1,20 @@
 //! On-disk swap records, one JSON file per swap.
 //!
+//! Both directions share this: a record is filed under its payment hash, and a
+//! store is typed to one kind of record, so a directory holds only one.
+//!
 //! Writes go through a temporary file and a rename, so a crash can never leave
 //! a half-written record behind. Unreadable records are reported as errors: a
 //! maker must not silently forget a swap.
 
 use std::fs;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use swapsite_core::maker::SwapRecord;
+use swapsite_core::submarine::SubmarineRecord;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -25,18 +32,40 @@ pub enum StoreError {
     },
 }
 
-pub struct SwapStore {
-    dir: PathBuf,
+/// A record the store can file by name.
+pub trait Stored {
+    /// The name it is filed under, without the extension.
+    fn id(&self) -> &str;
 }
 
-impl SwapStore {
+impl Stored for SwapRecord {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Stored for SubmarineRecord {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+pub struct SwapStore<T = SwapRecord> {
+    dir: PathBuf,
+    _record: PhantomData<T>,
+}
+
+impl<T: Stored + Serialize + DeserializeOwned> SwapStore<T> {
     pub fn open(dir: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let dir = dir.into();
         fs::create_dir_all(&dir).map_err(|source| StoreError::Io {
             path: dir.clone(),
             source,
         })?;
-        Ok(Self { dir })
+        Ok(Self {
+            dir,
+            _record: PhantomData,
+        })
     }
 
     pub fn dir(&self) -> &Path {
@@ -48,12 +77,13 @@ impl SwapStore {
     }
 
     /// Write a record atomically.
-    pub fn save(&self, record: &SwapRecord) -> Result<(), StoreError> {
-        let path = self.path(&record.id);
+    pub fn save(&self, record: &T) -> Result<(), StoreError> {
+        let id = record.id();
+        let path = self.path(id);
         let temp = path.with_extension("json.tmp");
 
         let json = serde_json::to_string_pretty(record).map_err(|source| StoreError::Json {
-            id: record.id.clone(),
+            id: id.to_owned(),
             source,
         })?;
 
@@ -64,7 +94,7 @@ impl SwapStore {
         fs::rename(&temp, &path).map_err(|source| StoreError::Io { path, source })
     }
 
-    pub fn load(&self, id: &str) -> Result<SwapRecord, StoreError> {
+    pub fn load(&self, id: &str) -> Result<T, StoreError> {
         let path = self.path(id);
         let text = fs::read_to_string(&path).map_err(|source| StoreError::Io {
             path: path.clone(),
@@ -101,7 +131,7 @@ impl SwapStore {
         Ok(ids)
     }
 
-    pub fn all(&self) -> Result<Vec<SwapRecord>, StoreError> {
+    pub fn all(&self) -> Result<Vec<T>, StoreError> {
         self.ids()?.into_iter().map(|id| self.load(&id)).collect()
     }
 }
@@ -197,7 +227,7 @@ mod tests {
 
     #[test]
     fn reports_a_missing_record() {
-        let store = SwapStore::open(temp_dir("missing")).unwrap();
+        let store: SwapStore = SwapStore::open(temp_dir("missing")).unwrap();
         assert!(store.load("nope").is_err());
     }
 }

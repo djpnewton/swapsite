@@ -18,6 +18,7 @@ pub mod params;
 pub mod recovery;
 pub mod spend;
 pub mod state;
+pub mod submarine;
 
 pub use chain::{Chain, ChainError};
 pub use hash::{PaymentHash, Preimage};

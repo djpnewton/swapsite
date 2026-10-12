@@ -182,6 +182,14 @@ impl LnCli {
         Ok(entries)
     }
 
+    /// Decode a bolt11 invoice: what it pays, to what hash, over what CLTV.
+    ///
+    /// The hash comes from the invoice rather than from whoever handed it over:
+    /// an HTLC built to a hash they merely named would be unclaimable.
+    pub fn decode_invoice(&self, bolt11: &str) -> Result<DecodedInvoice, LightningError> {
+        DecodedInvoice::from_lnd(&self.run(&["decodepayreq", bolt11])?)
+    }
+
     /// A fresh on-chain address belonging to this node.
     ///
     /// Fresh every call, so this belongs behind a button and not behind a poll:
@@ -241,6 +249,37 @@ impl LnCli {
             ])?,
             "payment_request",
         )
+    }
+}
+
+/// What a bolt11 invoice pays, and when it stops being payable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedInvoice {
+    /// The payment hash, hex: the hash the deposit's HTLC has to pay to.
+    pub payment_hash: String,
+    /// What the invoice is for, in satoshis.
+    pub sats: u64,
+    /// Blocks a payment for it must be given after the height it is made.
+    pub cltv_delta: u32,
+    /// Unix time it expires at, after which no node will pay it.
+    pub expires_at: u64,
+}
+
+impl DecodedInvoice {
+    pub fn from_lnd(json: &str) -> Result<Self, LightningError> {
+        let value = parse(json)?;
+        let payment_hash = text(value.get("payment_hash"));
+        if payment_hash.is_empty() {
+            return Err(LightningError::Output(
+                "decodepayreq returned no payment hash".to_owned(),
+            ));
+        }
+        Ok(Self {
+            payment_hash,
+            sats: sat(value.get("num_satoshis")),
+            cltv_delta: int(value.get("cltv_expiry")).max(0) as u32,
+            expires_at: (int(value.get("timestamp")) + int(value.get("expiry")).max(0)) as u64,
+        })
     }
 }
 
@@ -507,6 +546,30 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// The payload `decodepayreq` answers with, trimmed to the fields the maker
+    /// reads. Amounts come back as strings, which is LND's habit.
+    #[test]
+    fn a_decoded_invoice_carries_its_hash_amount_and_expiry() {
+        let decoded = DecodedInvoice::from_lnd(
+            r#"{
+                "payment_hash": "02d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc",
+                "num_satoshis": "1000",
+                "cltv_expiry": "80",
+                "timestamp": "1791829177",
+                "expiry": "86400"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            decoded.payment_hash,
+            "02d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc"
+        );
+        assert_eq!(decoded.sats, 1_000);
+        assert_eq!(decoded.cltv_delta, 80);
+        assert_eq!(decoded.expires_at, 1_791_829_177 + 86_400);
     }
 
     #[test]

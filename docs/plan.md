@@ -167,6 +167,7 @@ flowchart LR
 | M3 | L-BTC legs: elements regtest, LWK signer. L-BTC <-> LN falls out of M1. | not started |
 | M4 | BTC <-> L-BTC direct: two on-chain legs, no LN, chain-aware margins. | not started |
 | M5 | Multiple makers, Nostr discovery. | not started |
+| M6 | Submarine direction (BTC on chain to LN): the taker deposits first, no bond. | done, see [regtest.md](regtest.md) |
 
 Registry of decisions:
 
@@ -196,6 +197,12 @@ Registry of decisions:
   profit. This is the arrangement the Lightning Engineering pages describe as a
   "non-refundable Lightning payment upfront ... to compensate for the
   opportunity cost of funds being locked up".
+- **The submarine direction has no bond.** The taker's deposit is the
+  collateral: a taker that walks away has parked its own money until the
+  locktime, so the maker is not exposed to a free option the way it is when it
+  funds first. The mirror of that option is the maker's, which is why it may pay
+  only while `has_margin(locktime, height + cltv_delta, MIN_MARGIN_BLOCKS)`
+  holds: a payment made any later would expire after the taker can refund.
 - **The refund has to outlive the payment.** `LegTimelocks` refuses any swap whose
   on-chain timeout does not clear the invoice's final CLTV delta by
   `MIN_MARGIN_BLOCKS`, both when an offer is built and when a record is read back
@@ -257,6 +264,10 @@ Registry of decisions:
 
 ## 9. Risks and open questions
 
+- Submarine claim timing: the maker pays only with `MIN_MARGIN_BLOCKS` between
+  the payment's expiry and the taker's locktime, so a claim always has room to
+  land first. If the maker stalls past that room the taker refunds and keeps the
+  payment, the asymmetry the reverse direction's bond exists to reduce.
 - Browser key security: XSS in the frontend is a total loss for an in-flight
   swap. Mitigate with a minimal, static, dependency-pinned client and CSP.
 - Refund automation: dead swaps are the main UX failure. Needs a background job

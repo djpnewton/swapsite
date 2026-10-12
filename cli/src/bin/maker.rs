@@ -8,12 +8,12 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::thread;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::{
     consensus::encode::{deserialize, serialize_hex},
     secp256k1::{Secp256k1, SecretKey},
-    Address, Amount, Network, PublicKey, Transaction,
+    Address, Amount, Network, OutPoint, PublicKey, Transaction,
 };
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
@@ -27,25 +27,16 @@ use swapsite_core::{
     htlc::Htlc,
     lightning::{InvoiceState, LightningNode},
     maker::{plan, reconcile, Action, Funding, Observed, PublicSwap, SwapRecord},
-    params::{LegTimelocks, DEFAULT_CLTV_DELTA, MIN_MARGIN_BLOCKS},
+    params::{
+        LegTimelocks, DEFAULT_CLTV_DELTA, DEFAULT_LOCKTIME_MARGIN, MIN_MARGIN_BLOCKS,
+        PAYMENT_WINDOW_BLOCKS,
+    },
+    spend,
     state::{Event, SwapState},
+    submarine::{self, SubmarineRecord},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-/// Blocks a taker has left to pay in at the latest moment the maker may fund
-/// (the bond's deadline), which is when its window is smallest.
-///
-/// A longer window costs the maker capital, and only on a swap that is
-/// abandoned, which is what the bond is for. A shorter one makes a merely slow
-/// taker's payment unsafe.
-const PAYMENT_WINDOW_BLOCKS: u32 = 30;
-
-/// Blocks from the last funding height to the refund.
-///
-/// The invoice's CLTV delta plus the minimum margin plus the window above: any
-/// less and a payment would expire too close to the refund to be claimed.
-const DEFAULT_LOCKTIME_MARGIN: u32 = DEFAULT_CLTV_DELTA + MIN_MARGIN_BLOCKS + PAYMENT_WINDOW_BLOCKS;
 
 #[derive(Parser)]
 #[command(name = "maker", about = "Maker daemon for trustless swaps")]
@@ -119,6 +110,57 @@ enum Cmd {
         /// Address to listen on.
         #[arg(long, default_value = "127.0.0.1:3200")]
         listen: String,
+    },
+
+    /// Offer a submarine swap: the taker deposits first, we pay its invoice.
+    SubmarineOffer {
+        #[command(flatten)]
+        config: NodeConfig,
+        /// The taker's invoice, which our payment settles.
+        #[arg(long)]
+        invoice: String,
+        /// The key the taker refunds the deposit with, hex.
+        #[arg(long)]
+        refund_pubkey: String,
+        /// Height from which the taker may refund the deposit.
+        #[arg(long)]
+        locktime: u32,
+        /// Our fee, on top of the invoice, in satoshis.
+        #[arg(long, default_value_t = 0)]
+        fee: u64,
+        /// Fee the claim transaction pays out of the deposit, in satoshis.
+        #[arg(long, default_value_t = 2_000)]
+        claim_fee: u64,
+    },
+
+    /// Record a deposit a taker reports, after checking it pays the HTLC.
+    SubmarineFunded {
+        #[command(flatten)]
+        config: NodeConfig,
+        /// The swap id: the invoice's payment hash.
+        #[arg(long)]
+        id: String,
+        /// The deposit, as `txid:vout`.
+        #[arg(long)]
+        outpoint: String,
+    },
+
+    /// Run the submarine half of the daemon: pay invoices, claim deposits.
+    SubmarineRun {
+        #[command(flatten)]
+        config: NodeConfig,
+        /// Run a single sweep and exit.
+        #[arg(long)]
+        once: bool,
+    },
+
+    /// Print the submarine swaps on disk.
+    SubmarineStatus {
+        #[command(flatten)]
+        config: NodeConfig,
+        /// Show only this swap.
+        #[arg(long)]
+        id: Option<String>,
     },
 }
 
@@ -194,6 +236,14 @@ impl NodeConfig {
     fn store(&self) -> Result<SwapStore> {
         Ok(SwapStore::open(&self.dir)?)
     }
+
+    /// The store for the submarine direction's swaps.
+    ///
+    /// A subdirectory of `--dir`, because a store is typed to one kind of
+    /// record: both directions in one directory would be read as one.
+    fn submarine_store(&self) -> Result<SwapStore<SubmarineRecord>> {
+        Ok(SwapStore::open(self.dir.join("submarine"))?)
+    }
 }
 
 fn main() -> Result<()> {
@@ -226,7 +276,265 @@ fn main() -> Result<()> {
         Cmd::Run { config, once } => run(&config, once),
         Cmd::Status { config, id } => status(&config, id.as_deref()),
         Cmd::Serve { config, listen } => serve(&config, &listen),
+        Cmd::SubmarineOffer {
+            config,
+            invoice,
+            refund_pubkey,
+            locktime,
+            fee,
+            claim_fee,
+        } => submarine_offer(&config, &invoice, &refund_pubkey, locktime, fee, claim_fee),
+        Cmd::SubmarineFunded {
+            config,
+            id,
+            outpoint,
+        } => submarine_funded(&config, &id, &outpoint),
+        Cmd::SubmarineRun { config, once } => submarine_run(&config, once),
+        Cmd::SubmarineStatus { config, id } => submarine_status(&config, id.as_deref()),
     }
+}
+
+/// Offer a submarine swap: the taker deposits on chain, we pay its invoice.
+///
+/// Nothing is deposited yet, and nothing can be: the terms are measured against
+/// the chain's own height first, so a locktime that would leave a late payment
+/// unclaimable is refused rather than offered.
+fn submarine_offer(
+    config: &NodeConfig,
+    invoice: &str,
+    refund_pubkey: &str,
+    locktime: u32,
+    fee: u64,
+    claim_fee: u64,
+) -> Result<()> {
+    let chain = config.chain()?;
+    let lightning = config.lightning()?;
+    let store = config.submarine_store()?;
+
+    let decoded = lightning.decode_invoice(invoice)?;
+    if decoded.sats == 0 {
+        return Err("refusing to offer this swap: the invoice is for no amount".into());
+    }
+    let height = chain.height()?;
+    submarine::check_locktime(locktime, height, decoded.cltv_delta, PAYMENT_WINDOW_BLOCKS)
+        .map_err(|e| {
+            format!(
+                "refusing to offer this swap: the deposit could be refunded before a payment \
+                 made in the next {PAYMENT_WINDOW_BLOCKS} blocks could expire ({e})"
+            )
+        })?;
+
+    // A fresh claim key per swap, so one leaked record cannot expose the rest.
+    let mut rng = bitcoin::secp256k1::rand::thread_rng();
+    let claim_key = SecretKey::new(&mut rng);
+
+    let record = SubmarineRecord {
+        id: decoded.payment_hash.clone(),
+        invoice: invoice.to_owned(),
+        receive_sat: decoded.sats,
+        deposit_sat: submarine::deposit_sat(decoded.sats, fee, claim_fee),
+        fee_sat: fee,
+        claim_fee_sat: claim_fee,
+        claim_secret: hex::encode(claim_key.secret_bytes()),
+        refund_pubkey: refund_pubkey.to_owned(),
+        locktime,
+        cltv_delta: decoded.cltv_delta,
+        expires_at: decoded.expires_at,
+        deposit: None,
+        preimage: None,
+        claim_txid: None,
+    };
+    // Built once here, so a key or a locktime the HTLC will not accept is
+    // refused now rather than after a taker has moved money.
+    let address = record.address(config.network()?)?;
+
+    // Saved before it is offered, for the same reason the other direction saves
+    // before it funds: a deposit nobody wrote down is one nobody claims.
+    store.save(&record)?;
+
+    eprintln!(
+        "submarine swap offered: {} sat on chain for {} over Lightning",
+        record.deposit_sat, record.receive_sat
+    );
+    println!("id={}", record.id);
+    println!("invoice={}", record.invoice);
+    println!("deposit_sat={}", record.deposit_sat);
+    println!("htlc_address={}", address);
+    println!("claim_pubkey={}", record.claim_pubkey()?);
+    println!("locktime={}", record.locktime);
+    println!("cltv_delta={}", record.cltv_delta);
+    println!("expires_at={}", record.expires_at);
+    Ok(())
+}
+
+/// Record the deposit a taker reports, once it has been checked on chain.
+///
+/// The maker is told the outpoint rather than looking for it: finding an output
+/// by address would need an index. Nothing is taken on trust here, since the
+/// transaction is fetched and its script and amount are checked.
+fn submarine_funded(config: &NodeConfig, id: &str, outpoint: &str) -> Result<()> {
+    let chain = config.chain()?;
+    let store = config.submarine_store()?;
+    let mut record = store.load(id)?;
+    if record.deposit.is_some() {
+        return Err(format!("swap {id} already has a deposit").into());
+    }
+    let outpoint = OutPoint::from_str(outpoint)?;
+
+    let tx = chain
+        .transaction(&outpoint.txid)?
+        .ok_or_else(|| format!("no transaction {}", outpoint.txid))?;
+    let tx: Transaction = decode_hex(&tx.hex)?;
+    let output = tx
+        .output
+        .get(outpoint.vout as usize)
+        .ok_or_else(|| format!("{} has no output {}", outpoint.txid, outpoint.vout))?;
+
+    let expected = record.address(config.network()?)?.script_pubkey();
+    if output.script_pubkey != expected {
+        return Err(format!("{outpoint} does not pay this swap's HTLC").into());
+    }
+    if output.value.to_sat() != record.deposit_sat {
+        return Err(format!(
+            "{outpoint} pays {} sat, the swap asks for exactly {}",
+            output.value.to_sat(),
+            record.deposit_sat
+        )
+        .into());
+    }
+
+    record.deposit = Some(outpoint);
+    store.save(&record)?;
+    println!("deposit={outpoint}");
+    println!("sats={}", output.value.to_sat());
+    Ok(())
+}
+
+/// The submarine half of the daemon loop.
+fn submarine_run(config: &NodeConfig, once: bool) -> Result<()> {
+    loop {
+        submarine_sweep(config)?;
+        if once {
+            return Ok(());
+        }
+        sleep(Duration::from_secs(config.interval));
+    }
+}
+
+/// One pass over every submarine swap: pay what can be paid, claim what is
+/// known.
+fn submarine_sweep(config: &NodeConfig) -> Result<()> {
+    let chain = config.chain()?;
+    let lightning = config.lightning()?;
+    let store = config.submarine_store()?;
+    let height = chain.height()?;
+    let unix_now = unix_now()?;
+
+    for id in store.ids()? {
+        let mut record = store.load(&id)?;
+        let confirmations = record
+            .deposit
+            .map(|outpoint| chain.confirmations(&outpoint.txid).ok())
+            .unwrap_or_default();
+        let observed = submarine::Observed {
+            height,
+            unix_now,
+            confirmations,
+        };
+
+        match submarine::plan(&record, observed) {
+            submarine::Action::Wait(why) => eprintln!("[submarine] {id}: {why}"),
+            submarine::Action::Done => {}
+            submarine::Action::TooLateToPay { blocks_left } => eprintln!(
+                "[submarine] {id}: too_late_to_pay: a payment now would expire too close to \
+                 the refund at {}, which leaves {blocks_left} blocks of room",
+                record.locktime
+            ),
+            submarine::Action::InvoiceExpired => eprintln!(
+                "[submarine] {id}: invoice_expired: the invoice expired before the deposit \
+                 arrived, so the taker has to refund it"
+            ),
+            submarine::Action::Pay => match lightning.pay(&record.invoice) {
+                Ok(preimage) => {
+                    record.preimage = Some(preimage.to_hex());
+                    store.save(&record)?;
+                    eprintln!(
+                        "[submarine] {id}: paid {} sat, the preimage is known",
+                        record.receive_sat
+                    );
+                }
+                // A failed payment costs nothing: the invoice is unpaid and the
+                // deposit is still there to try again, or for the taker to
+                // refund. Paying is refused above once that stops being true.
+                Err(e) => eprintln!("[submarine] {id}: payment failed: {e}"),
+            },
+            submarine::Action::Claim => {
+                let preimage = record
+                    .preimage()?
+                    .ok_or("the claim was planned without a preimage")?;
+                let to = chain.new_address()?;
+                let tx = spend::claim(
+                    &record.htlc()?,
+                    record.outpoint()?,
+                    Amount::from_sat(record.deposit_sat),
+                    &to,
+                    Amount::from_sat(record.claim_fee_sat),
+                    &record.claim_key()?,
+                    &preimage,
+                )?;
+                let txid = chain.broadcast(&tx)?;
+                record.claim_txid = Some(txid.to_string());
+                store.save(&record)?;
+                eprintln!(
+                    "[submarine] {id}: claimed {} sat to {to}",
+                    record.deposit_sat - record.claim_fee_sat
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Print the submarine swaps on disk, one `key=value` line each.
+fn submarine_status(config: &NodeConfig, id: Option<&str>) -> Result<()> {
+    let store = config.submarine_store()?;
+    let ids = match id {
+        Some(id) => vec![id.to_owned()],
+        None => store.ids()?,
+    };
+
+    for id in ids {
+        let record = store.load(&id)?;
+        println!("id={}", record.id);
+        println!("invoice={}", record.invoice);
+        println!("receive_sat={}", record.receive_sat);
+        println!("deposit_sat={}", record.deposit_sat);
+        println!("htlc_address={}", record.address(config.network()?)?);
+        println!(
+            "deposit={}",
+            record
+                .deposit
+                .map(|outpoint| outpoint.to_string())
+                .unwrap_or_else(|| "-".to_owned())
+        );
+        println!("locktime={}", record.locktime);
+        println!(
+            "preimage={}",
+            record.preimage.clone().unwrap_or_else(|| "-".to_owned())
+        );
+        println!(
+            "claim_txid={}",
+            record.claim_txid.clone().unwrap_or_else(|| "-".to_owned())
+        );
+    }
+    Ok(())
+}
+
+fn unix_now() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("the clock is before the epoch: {e}"))?
+        .as_secs())
 }
 
 /// A request to create a swap, from the CLI or over the control plane.

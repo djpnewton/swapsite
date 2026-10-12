@@ -18,6 +18,21 @@ pub const MIN_MARGIN_BLOCKS: u32 = 12;
 /// refund has to outlive it: see [`LegTimelocks`].
 pub const DEFAULT_CLTV_DELTA: u32 = 40;
 
+/// Blocks a counterparty is given to act in at the last moment either side may
+/// still act, which is the moment its window is smallest.
+///
+/// Folded into the locktime margin below, so an action taken at the very last
+/// moment still leaves a payment that can be claimed.
+pub const PAYMENT_WINDOW_BLOCKS: u32 = 30;
+
+/// Blocks from the last height a leg may be started at to the refund.
+///
+/// The payment's CLTV delta plus the minimum margin plus the window above: any
+/// less and a payment made at the last moment would expire too close to the
+/// refund to be claimed.
+pub const DEFAULT_LOCKTIME_MARGIN: u32 =
+    DEFAULT_CLTV_DELTA + MIN_MARGIN_BLOCKS + PAYMENT_WINDOW_BLOCKS;
+
 /// Whether `initiator` outlives `counterparty` by at least `margin` blocks.
 ///
 /// The same rule as [`LegTimelocks::new`], for a caller that has plain heights

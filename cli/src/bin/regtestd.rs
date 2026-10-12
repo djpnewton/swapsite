@@ -206,7 +206,7 @@ fn node_status(cli: &Cli, role: &str) -> Value {
 /// The maker's swaps, as the panel needs them.
 fn swaps(cli: &Cli) -> Value {
     section(|| {
-        let store = SwapStore::open(&cli.dir)?;
+        let store: SwapStore = SwapStore::open(&cli.dir)?;
         let listed: Vec<Value> = store
             .all()?
             .iter()
