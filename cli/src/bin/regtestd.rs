@@ -19,8 +19,8 @@ use clap::Parser;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use swapsite_adapters::{
-    http::{serve, Request, Response},
-    lncli::{Direction, Entry},
+    http::{content_type_for, serve, Request, Response},
+    lncli::{Direction, Entry, Kind},
     store::SwapStore,
     BitcoinRpc, LnCli,
 };
@@ -224,15 +224,16 @@ fn swaps(cli: &Cli) -> Value {
     })
 }
 
-/// The taker node's history, both directions, newest first.
+/// The taker node's history, both directions and both layers, newest first.
 ///
-/// Sent and received come from two different commands, so the panel merges them
-/// rather than making the page do it.
+/// Sent, received and on-chain come from three different commands, so the panel
+/// merges them rather than making the page do it.
 fn history(cli: &Cli) -> Value {
     section(|| {
         let node = cli.node("taker")?;
         let mut entries = node.sent()?;
         entries.extend(node.received()?);
+        entries.extend(node.onchain_history()?);
         entries.sort_by_key(|entry| -entry.at);
 
         Ok(json!(entries
@@ -244,6 +245,10 @@ fn history(cli: &Cli) -> Value {
 
 fn entry_json(entry: &Entry) -> Value {
     json!({
+        "kind": match entry.kind {
+            Kind::Lightning => "lightning",
+            Kind::Onchain => "onchain",
+        },
         "direction": match entry.direction {
             Direction::Sent => "sent",
             Direction::Received => "received",
@@ -421,18 +426,8 @@ fn file(cli: &Cli, path: &str) -> Response {
     }
 
     match std::fs::read(cli.web.join(name)) {
-        Ok(bytes) => Response::bytes(200, content_type(name), bytes),
+        Ok(bytes) => Response::bytes(200, content_type_for(name), bytes),
         Err(_) => Response::not_found(),
-    }
-}
-
-/// Three types are enough for one page with no dependencies.
-fn content_type(name: &str) -> &'static str {
-    match name.rsplit_once('.').map(|(_, extension)| extension) {
-        Some("html") => "text/html; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
-        _ => "application/octet-stream",
     }
 }
 
@@ -514,10 +509,14 @@ mod tests {
 
     #[test]
     fn content_types_are_pinned_by_extension() {
-        assert!(content_type("regtest.html").starts_with("text/html"));
-        assert!(content_type("app.css").starts_with("text/css"));
-        assert!(content_type("regtest.js").starts_with("text/javascript"));
-        assert_eq!(content_type("something.bin"), "application/octet-stream");
+        assert!(content_type_for("regtest.html").starts_with("text/html"));
+        assert!(content_type_for("app.css").starts_with("text/css"));
+        assert!(content_type_for("regtest.js").starts_with("text/javascript"));
+        assert!(content_type_for("pager.mjs").starts_with("text/javascript"));
+        assert_eq!(
+            content_type_for("something.bin"),
+            "application/octet-stream"
+        );
     }
 
     #[test]
@@ -619,6 +618,24 @@ mod tests {
         // rather than blanking the panel.
         let value = status(&cli());
         assert!(value.get("history").is_some());
+    }
+
+    #[test]
+    fn a_history_line_says_which_layer_it_came_from() {
+        let entry = Entry {
+            kind: Kind::Onchain,
+            direction: Direction::Sent,
+            sats: 1_154,
+            state: "unconfirmed".to_owned(),
+            at: 12,
+            hash: "1f3b577d".to_owned(),
+        };
+
+        let value = entry_json(&entry);
+        assert_eq!(value["kind"], "onchain");
+        assert_eq!(value["direction"], "sent");
+        assert_eq!(value["sats"], 1_154);
+        assert_eq!(value["state"], "unconfirmed");
     }
 
     #[test]

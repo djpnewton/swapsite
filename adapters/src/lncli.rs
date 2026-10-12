@@ -171,6 +171,17 @@ impl LnCli {
         Entry::received_from_lnd(&self.run(&["listinvoices", "--max_invoices", "25"])?)
     }
 
+    /// The node's on-chain transactions, newest first.
+    ///
+    /// Capped at 50: the panel shows a page at a time, and a wallet with years
+    /// of history should not put all of it on the wire.
+    pub fn onchain_history(&self) -> Result<Vec<Entry>, LightningError> {
+        let mut entries = Entry::onchain_from_lnd(&self.run(&["listchaintxns"])?)?;
+        entries.sort_by_key(|entry| -entry.at);
+        entries.truncate(50);
+        Ok(entries)
+    }
+
     /// A fresh on-chain address belonging to this node.
     ///
     /// Fresh every call, so this belongs behind a button and not behind a poll:
@@ -292,7 +303,8 @@ fn text(value: Option<&Value>) -> String {
 }
 
 /// Seconds since the epoch, from a string or a number.
-fn secs(value: Option<&Value>) -> i64 {
+/// The integer in a JSON field, which LND sometimes sends as a string.
+fn int(value: Option<&Value>) -> i64 {
     match value {
         Some(Value::String(text)) => text.parse().unwrap_or(0),
         Some(Value::Number(number)) => number.as_i64().unwrap_or(0),
@@ -341,16 +353,25 @@ pub enum Direction {
     Received,
 }
 
-/// One line of a node's history, from either direction.
+/// Which layer a line of history came from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Lightning,
+    Onchain,
+}
+
+/// One line of a node's history, from either direction and either layer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Entry {
+    pub kind: Kind,
     pub direction: Direction,
     pub sats: u64,
-    /// The state the node reports: `SUCCEEDED`, `IN_FLIGHT`, `SETTLED`, `OPEN`.
+    /// The state the node reports: `SUCCEEDED`, `IN_FLIGHT`, `SETTLED`, `OPEN`,
+    /// or `confirmed`/`unconfirmed` on chain.
     pub state: String,
     /// Unix seconds, or zero when the node did not say.
     pub at: i64,
-    /// Payment hash, so a line can be matched against a swap.
+    /// Payment hash or transaction id, so a line can be matched against a swap.
     pub hash: String,
 }
 
@@ -360,11 +381,12 @@ impl Entry {
         let value = parse(json)?;
         Ok(entries(value.get("payments"))
             .map(|payment| Self {
+                kind: Kind::Lightning,
                 direction: Direction::Sent,
                 // Both spellings appear across versions; the tie is not close.
                 sats: sat(payment.get("value_sat")).max(sat(payment.get("value"))),
                 state: text(payment.get("status")),
-                at: secs(payment.get("creation_date")),
+                at: int(payment.get("creation_date")),
                 hash: text(payment.get("payment_hash")),
             })
             .collect())
@@ -375,13 +397,45 @@ impl Entry {
         let value = parse(json)?;
         Ok(entries(value.get("invoices"))
             .map(|invoice| Self {
+                kind: Kind::Lightning,
                 direction: Direction::Received,
                 // `amt_paid_sat` is what arrived; `value` is what was asked for,
                 // which is what to show while it is still unpaid.
                 sats: sat(invoice.get("amt_paid_sat")).max(sat(invoice.get("value"))),
                 state: invoice_state(invoice),
-                at: secs(invoice.get("settle_date")).max(secs(invoice.get("creation_date"))),
+                at: int(invoice.get("settle_date")).max(int(invoice.get("creation_date"))),
                 hash: text(invoice.get("r_hash")),
+            })
+            .collect())
+    }
+
+    /// Read `listchaintxns` output.
+    ///
+    /// The node reports what the wallet's balance did, so a negative `amount` is
+    /// a send and its magnitude includes the fee - which is the number that
+    /// belongs in a history line, since it is what left the wallet.
+    pub fn onchain_from_lnd(json: &str) -> Result<Vec<Self>, LightningError> {
+        let value = parse(json)?;
+        Ok(entries(value.get("transactions"))
+            .map(|tx| {
+                let amount = int(tx.get("amount"));
+                Self {
+                    kind: Kind::Onchain,
+                    direction: if amount < 0 {
+                        Direction::Sent
+                    } else {
+                        Direction::Received
+                    },
+                    sats: amount.unsigned_abs(),
+                    state: if int(tx.get("num_confirmations")) > 0 {
+                        "confirmed"
+                    } else {
+                        "unconfirmed"
+                    }
+                    .to_owned(),
+                    at: int(tx.get("time_stamp")),
+                    hash: text(tx.get("tx_hash")),
+                }
             })
             .collect())
     }
@@ -654,6 +708,7 @@ mod tests {
 
         let entries = Entry::sent_from_lnd(listed).unwrap();
         assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].kind, Kind::Lightning);
         assert_eq!(entries[0].direction, Direction::Sent);
         assert_eq!(entries[0].sats, 30_030);
         assert_eq!(entries[0].state, "SUCCEEDED");
@@ -692,10 +747,40 @@ mod tests {
     }
 
     #[test]
+    fn an_onchain_send_is_signed_and_a_receipt_is_not() {
+        // Copied from a real `listchaintxns` on LND 0.18.3: a send of 1,000 sat
+        // that cost 154 in fees reads as -1154, and a claim of 30,000 as +30000.
+        let listed = r#"{"transactions": [
+            {"tx_hash": "1f3b577d", "amount": -1154, "total_fees": 154,
+             "num_confirmations": 0, "time_stamp": 1791826354},
+            {"tx_hash": "85f69f98", "amount": 30000, "num_confirmations": 3,
+             "time_stamp": 1791822567}
+        ]}"#;
+
+        let entries = Entry::onchain_from_lnd(listed).unwrap();
+        assert_eq!(entries[0].kind, Kind::Onchain);
+        assert_eq!(entries[0].direction, Direction::Sent);
+        // What left the wallet, fee included: that is the honest line.
+        assert_eq!(entries[0].sats, 1_154);
+        assert_eq!(entries[0].state, "unconfirmed");
+        assert_eq!(entries[0].hash, "1f3b577d");
+        assert_eq!(entries[1].direction, Direction::Received);
+        assert_eq!(entries[1].sats, 30_000);
+        assert_eq!(entries[1].state, "confirmed");
+        assert_eq!(entries[1].at, 1_791_822_567);
+    }
+
+    #[test]
     fn an_empty_ledger_is_empty_rather_than_an_error() {
-        for listed in ["{}", r#"{"payments": []}"#, r#"{"invoices": []}"#] {
+        for listed in [
+            "{}",
+            r#"{"payments": []}"#,
+            r#"{"invoices": []}"#,
+            r#"{"transactions": []}"#,
+        ] {
             assert!(Entry::sent_from_lnd(listed).unwrap().is_empty());
             assert!(Entry::received_from_lnd(listed).unwrap().is_empty());
+            assert!(Entry::onchain_from_lnd(listed).unwrap().is_empty());
         }
     }
 
@@ -703,6 +788,7 @@ mod tests {
     fn ledger_output_that_is_not_json_is_an_error() {
         assert!(Entry::sent_from_lnd("not json").is_err());
         assert!(Entry::received_from_lnd("").is_err());
+        assert!(Entry::onchain_from_lnd("not json").is_err());
     }
 
     #[test]

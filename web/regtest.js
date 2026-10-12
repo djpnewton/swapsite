@@ -4,6 +4,14 @@
 // it does are mine blocks and drive the taker's node as a wallet, because a swap
 // needs both and shelling into a container to do either is the alternative.
 
+import {
+  PAGE_SIZES,
+  newPager,
+  paginate,
+  pagerCommand,
+  pagerHtml,
+} from "/pager.mjs";
+
 const $ = (id) => document.getElementById(id);
 const sats = (n) => `${Number(n).toLocaleString()} sat`;
 const short = (text, head = 10, tail = 6) =>
@@ -11,6 +19,17 @@ const short = (text, head = 10, tail = 6) =>
 
 /** A deadline this close is worth showing in red. Matches URGENT_BLOCKS. */
 const URGENT_BLOCKS = 12;
+
+// One pager and one set of filters per list. Held here rather than read back off
+// the controls, because the panel re-renders on a poll and a choice has to
+// survive that.
+const lists = {
+  history: {
+    pager: newPager(),
+    filters: { kind: "", direction: "", state: "" },
+  },
+  swaps: { pager: newPager(), filters: { state: "" } },
+};
 
 const when = (seconds) =>
   seconds > 0 ? new Date(seconds * 1000).toLocaleTimeString() : "-";
@@ -78,13 +97,41 @@ function nodeCard(role, node) {
     </article>`;
 }
 
-function historyTable(history) {
-  if (history.error) return `<p class="error">${history.error}</p>`;
-  if (history.length === 0) return `<p class="quote">nothing yet</p>`;
+/** The values a filter can take, taken from the rows themselves. */
+function values(rows, field) {
+  return [...new Set(rows.map((row) => row[field]))].sort();
+}
 
-  const rows = history
+/** A set of selects whose options are what the data actually contains. */
+function filtersMarkup(list, rows, fields) {
+  return fields
+    .map((field) => {
+      const chosen = lists[list].filters[field];
+      const options = ["", ...values(rows, field)]
+        .map(
+          (value) =>
+            `<option value="${value}"${value === chosen ? " selected" : ""}>` +
+            `${value === "" ? "any" : value.toLowerCase().replace(/_/g, " ")}</option>`,
+        )
+        .join("");
+
+      return `<label>${field} <select data-list="${list}" data-field="${field}">${options}</select></label>`;
+    })
+    .join("");
+}
+
+/** Every set filter agrees with the row, so an empty filter means "any". */
+function matches(row, filters) {
+  return Object.entries(filters).every(
+    ([field, wanted]) => wanted === "" || row[field] === wanted,
+  );
+}
+
+function historyTable(view) {
+  const rows = view.rows
     .map(
       (entry) => `<tr>
+        <td>${entry.kind}</td>
         <td>${entry.direction}</td>
         <td>${sats(entry.sats)}</td>
         <td>${entry.state.toLowerCase()}</td>
@@ -96,17 +143,16 @@ function historyTable(history) {
 
   return `<table>
     <thead>
-      <tr><th></th><th>amount</th><th>state</th><th>hash</th><th>at</th></tr>
+      <tr>
+        <th>layer</th><th></th><th>amount</th><th>state</th><th>hash</th><th>at</th>
+      </tr>
     </thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
 
-function swapTable(swaps, height) {
-  if (swaps.error) return `<p class="error">${swaps.error}</p>`;
-  if (swaps.length === 0) return `<p class="quote">no swaps yet</p>`;
-
-  const rows = swaps
+function swapTable(view, height) {
+  const rows = view.rows
     .map((swap) => {
       const left =
         swap.state === "refunded" || swap.state === "settled"
@@ -144,13 +190,64 @@ function swapTable(swaps, height) {
 // couple of seconds is enough to take the cursor out of a field being typed in.
 const painted = {};
 
+/** The last status, so a filter or a page can re-render without a round trip. */
+let last = null;
+
 function paint(id, markup) {
   if (painted[id] === markup) return;
   painted[id] = markup;
   $(id).innerHTML = markup;
 }
 
+/** Which list a control belongs to. Both the filters and the pagers say. */
+const listOf = (control) =>
+  control?.closest?.("[data-list]")?.dataset.list ?? null;
+
+/**
+ * Paint one filtered, paged list.
+ *
+ * The filters, the rows and the pager are painted separately, so a poll that
+ * changes nothing visible leaves every control exactly where it was.
+ */
+function list(id, section, fields, table) {
+  if (section?.error) {
+    paint(`${id}-filters`, "");
+    paint(id, `<p class="error">${section.error}</p>`);
+    paint(`${id}-pager`, "");
+    return;
+  }
+
+  const rows = Array.isArray(section) ? section : [];
+  const state = lists[id];
+
+  paint(
+    `${id}-filters`,
+    `<div class="filters">${filtersMarkup(id, rows, fields)}</div>`,
+  );
+
+  const view = paginate(
+    rows.filter((row) => matches(row, state.filters)),
+    state.pager,
+  );
+
+  paint(
+    id,
+    view.total > 0
+      ? table(view)
+      : `<p class="quote">${
+          rows.length === 0 ? "nothing yet" : "nothing matches the filter"
+        }</p>`,
+  );
+  paint(
+    `${id}-pager`,
+    view.total > PAGE_SIZES[0]
+      ? `<div data-list="${id}">${pagerHtml(view)}</div>`
+      : "",
+  );
+}
+
 function render(status) {
+  last = status;
   const height = typeof status.height === "number" ? status.height : null;
 
   paint(
@@ -159,8 +256,9 @@ function render(status) {
       .map(([role, node]) => nodeCard(role, node))
       .join(""),
   );
-  paint("history", historyTable(status.history));
-  paint("swaps", swapTable(status.swaps, height));
+
+  list("history", status.history, ["kind", "direction", "state"], historyTable);
+  list("swaps", status.swaps, ["state"], (view) => swapTable(view, height));
 
   $("chain").textContent = chainLine(status);
   $("foot").textContent = status.taker_url
@@ -275,6 +373,36 @@ $("make-invoice").addEventListener("click", makeInvoice);
 $("pay-invoice").addEventListener("click", payInvoice);
 $("make-address").addEventListener("click", makeAddress);
 $("send-coins").addEventListener("click", sendCoins);
+
+// Filters and page sizes are selects, so they arrive as changes. The panel
+// remembers the choice rather than reading it back off the control, because the
+// next poll repaints the list.
+document.addEventListener("change", (event) => {
+  const control = event.target;
+  const id = listOf(control);
+
+  if (control.dataset.field) {
+    lists[id].filters[control.dataset.field] = control.value;
+    lists[id].pager.page = 1;
+  } else {
+    const command = pagerCommand(control.closest("[data-size]"));
+    if (!command?.size) return;
+    lists[id].pager.size = command.size;
+    lists[id].pager.page = 1;
+  }
+
+  if (last) render(last);
+});
+
+document.addEventListener("click", (event) => {
+  const control = event.target.closest("[data-pager]");
+  const id = listOf(control);
+  const command = pagerCommand(control);
+  if (!id || !command?.move) return;
+
+  lists[id].pager.page += command.move;
+  if (last) render(last);
+});
 
 await refresh();
 setInterval(refresh, 2000);

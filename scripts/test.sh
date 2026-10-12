@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-#   ./scripts/test.sh             cargo test, and that the wasm module builds
+#   ./scripts/test.sh             cargo test, the wasm module builds, and the
+#                                 page's javascript tests
 #   ./scripts/test.sh --regtest   the above, then the seven regtest scripts
 #
 # The regtest scripts drive the docker stack and depend on each other's order
@@ -42,6 +43,12 @@ echo "== wasm build =="
 cargo build --release --target wasm32-unknown-unknown -p swapsite-wasm ||
   bad+=("wasm build")
 
+# The page's own shared code. Node's test runner is built in, so this needs
+# nothing installed.
+echo
+echo "== javascript tests =="
+node --test web/*.test.mjs || bad+=("javascript tests")
+
 if [ "$regtest" = 1 ]; then
   echo
   echo "== regtest scripts =="
@@ -76,5 +83,5 @@ fi
 if [ "$regtest" = 1 ]; then
   echo "ok: cargo test, the wasm build and ${#scripts[@]} regtest scripts"
 else
-  echo "ok: cargo test and the wasm build"
+  echo "ok: cargo test, the wasm build and the javascript tests"
 fi

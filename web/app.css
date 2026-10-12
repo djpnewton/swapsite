@@ -103,6 +103,58 @@ button.primary {
   min-height: 1.5rem;
 }
 
+/* The tabs above a list, and the pager under it. Both pages have lists. */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.tabs button {
+  padding: 0.35rem 0.7rem;
+  font-size: 0.9rem;
+}
+
+.tabs button.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tabs .count {
+  color: var(--dim);
+  font-size: 0.85em;
+}
+
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+  color: var(--dim);
+  font-size: 0.85rem;
+}
+
+/* The filters above a list: a row of labelled selects. */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  color: var(--dim);
+  font-size: 0.85rem;
+}
+
+.filters select {
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.2rem 0.4rem;
+}
+
 .swap {
   border: 1px solid var(--line);
   border-radius: 12px;

@@ -15,6 +15,13 @@
 
 import { relay } from "/relay.mjs";
 import { loadTaker } from "/taker.mjs";
+import {
+  PAGE_SIZES,
+  newPager,
+  paginate,
+  pagerCommand,
+  pagerHtml,
+} from "/pager.mjs";
 
 const taker = await loadTaker("/swapsite_wasm.wasm");
 const config = await (await fetch("/config")).json();
@@ -175,6 +182,24 @@ function outstanding() {
   return Object.keys(session.swaps)
     .map((id) => ({ id, recovery: verdict(id) }))
     .filter(({ recovery }) => recovery?.actionable);
+}
+
+/**
+ * Whether a swap is over, which is what puts it in the Closed tab.
+ *
+ * Three ways to be over, and they are checked here rather than derived from one
+ * field: the taker claimed it, the maker refunded it, or the verdict says there
+ * is nothing left to pay or claim. The state is checked as well as the verdict
+ * because a page that cannot reach the relay has no verdict at all, and a
+ * refunded swap is over whatever the relay says.
+ */
+function finished(id) {
+  const entry = session.swaps[id];
+  return Boolean(
+    entry.claimed ||
+      entry.swap?.state === "refunded" ||
+      ["gone", "expired", "too_late_to_pay"].includes(verdict(id)?.action.kind),
+  );
 }
 
 /**
@@ -521,9 +546,56 @@ function notice(recovery) {
 
 let lastMarkup = "";
 
-function render() {
+// The list is split by what is left to do about it, because that is the
+// question a taker has: anything still in flight, and anything already over.
+const TABS = [
+  ["active", "Active"],
+  ["closed", "Closed"],
+  ["all", "All"],
+];
+
+let tab = "active";
+const pager = newPager();
+
+function tabBar(counts) {
+  const buttons = TABS.map(
+    ([key, label]) =>
+      `<button data-tab="${key}"${key === tab ? ' class="on"' : ""}>` +
+      `${label} <span class="count">${counts[key]}</span></button>`,
+  ).join("");
+
+  return `<div class="tabs">${buttons}</div>`;
+}
+
+/** The tabs, the cards for this page, and the pager, as one piece of markup. */
+function listMarkup() {
+  // Newest first, in every tab.
   const ids = Object.keys(session.swaps).reverse();
-  const markup = ids.map((id) => card(id, session.swaps[id])).join("");
+  const counts = {
+    active: ids.filter((id) => !finished(id)).length,
+    closed: ids.filter(finished).length,
+    all: ids.length,
+  };
+
+  const showing = ids.filter(
+    (id) => tab === "all" || (tab === "closed") === finished(id),
+  );
+  const view = paginate(showing, pager);
+
+  if (view.total === 0) {
+    const note = ids.length === 0 ? "No swaps yet." : `Nothing ${tab} here.`;
+    return `${tabBar(counts)}<p class="quote">${note}</p>`;
+  }
+
+  const cards = view.rows.map((id) => card(id, session.swaps[id])).join("");
+  // A pager on a list of three is noise: it arrives with the second page.
+  const controls = view.total > PAGE_SIZES[0] ? pagerHtml(view) : "";
+
+  return `${tabBar(counts)}${cards}${controls}`;
+}
+
+function render() {
+  const markup = listMarkup();
 
   // Only touch the DOM when the markup actually changed. A poll runs every few
   // seconds, and replacing the list each time would take the cursor out of the
@@ -544,6 +616,20 @@ $("create").addEventListener("click", create);
 $("amount").addEventListener("change", () => askQuote().catch(() => {}));
 
 $("swaps").addEventListener("click", async (event) => {
+  const chosen = event.target.closest("button[data-tab]");
+  if (chosen) {
+    tab = chosen.dataset.tab;
+    pager.page = 1; // a new tab starts at its own first page
+    return render();
+  }
+
+  const control = event.target.closest("[data-pager]");
+  if (control) {
+    const command = pagerCommand(control);
+    if (command?.move) pager.page += command.move;
+    return render();
+  }
+
   const button = event.target.closest("button[data-act]");
   if (!button) return;
 
@@ -583,6 +669,16 @@ $("swaps").addEventListener("input", (event) => {
   if (addr) session.swaps[addr].address = event.target.value;
   if (preimage) session.swaps[preimage].typedPreimage = event.target.value;
   if (addr || preimage) persist();
+});
+
+// The page size is a select, so it arrives as a change rather than a click.
+$("swaps").addEventListener("change", (event) => {
+  const command = pagerCommand(event.target.closest("[data-size]"));
+  if (!command?.size) return;
+
+  pager.size = command.size;
+  pager.page = 1;
+  render();
 });
 
 // Recover after a reload: everything this key has going, straight from the
