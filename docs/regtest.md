@@ -144,6 +144,19 @@ docker compose -f docker/docker-compose.yml exec lnd-maker \
   lncli --network=regtest addholdinvoice <hex-preimage> --amt=100000
 ```
 
+`scripts/dev.sh` wraps the ones that come up often, which is usually quicker
+than the docker lines above:
+
+```bash
+./scripts/dev.sh mine 6                 # mine, and print the height
+./scripts/dev.sh btc getblockcount      # any bitcoin-cli call
+./scripts/dev.sh ln taker listchannels  # any lncli call
+./scripts/dev.sh records                # the swap records that exist
+./scripts/dev.sh swap 3c4f0c63          # one maker record, by any id prefix
+./scripts/dev.sh logs maker 20
+./scripts/dev.sh exec coordinator ls /records
+```
+
 ## Connecting the coordinator
 
 From inside the compose network:

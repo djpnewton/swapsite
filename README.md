@@ -27,6 +27,9 @@ the whole locktime.
 
 ```bash
 cargo test                       # unit tests, includes real script verification
+./scripts/format.sh              # rustfmt, then node --check and bash -n
+./scripts/format.sh --check      # the same, changing nothing
+./scripts/dev.sh                 # mine, lncli, bitcoin-cli, logs, records
 docker compose -f docker/docker-compose.yml up -d
 ./scripts/regtest-init.sh        # fund nodes, open a balanced channel
 ./scripts/regtest-onchain.sh     # fund, claim and refund an HTLC on-chain
