@@ -31,6 +31,9 @@ const sats = (n) => `${Number(n).toLocaleString()} sat`;
 const short = (text, head = 10, tail = 6) =>
   text.length <= head + tail ? text : `${text.slice(0, head)}…${text.slice(-tail)}`;
 
+/** A preimage is 32 bytes of hex, and nothing else can be signed with. */
+const isPreimage = (text) => /^[0-9a-f]{64}$/i.test(text);
+
 async function api(path, body) {
   const options =
     body === undefined
@@ -378,7 +381,7 @@ function card(id, entry) {
   if (recovery?.action.blocks_left !== undefined) {
     rows.push(`<dt>blocks left</dt><dd>${recovery.action.blocks_left}</dd>`);
   }
-  if (preimage) rows.push(`<dt>preimage</dt><dd>${short(preimage, 16, 8)}</dd>`);
+  if (preimage) rows.push(`<dt>preimage</dt><dd class="preimage">${preimage}</dd>`);
   if (claimed) {
     rows.push(`<dt>claimed</dt><dd>${short(claimed.txid)}</dd>`);
   }
@@ -536,6 +539,15 @@ $("swaps").addEventListener("click", async (event) => {
       const typed = (session.swaps[id].typedPreimage ?? "").trim();
       if (!typed) {
         update(id, { error: "paste the preimage your wallet gave you first" });
+        return;
+      }
+      if (!isPreimage(typed)) {
+        update(id, {
+          error:
+            typed.length === 64
+              ? "a preimage is 64 hex characters and this one has something else in it"
+              : `a preimage is 64 hex characters and this is ${typed.length}, so copy the whole value`,
+        });
         return;
       }
       update(id, { preimage: typed, error: null });

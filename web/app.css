@@ -194,6 +194,11 @@ dd {
   user-select: all;
 }
 
+/* A preimage is 64 hex characters that exist to be copied out whole. */
+.preimage {
+  user-select: all;
+}
+
 .ok {
   color: var(--good);
   margin: 0.5rem 0 0;
