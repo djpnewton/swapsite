@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# A submarine swap end to end: the taker deposits on chain first, the maker pays
+# A btc2ln swap end to end: the taker deposits on chain first, the maker pays
 # the taker's invoice over Lightning, and the maker claims the deposit with the
 # preimage that payment revealed.
 #
@@ -10,7 +10,7 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-STORE="$WORK/submarine-store"
+STORE="$WORK/btc2ln-store"
 rm -rf "$STORE"
 
 FEE=100
@@ -29,7 +29,7 @@ taker_terms() {
   preimage=$(printf '%s\n' "$out" | field preimage)
   hash=$(printf '%s\n' "$out" | field payment_hash)
   bolt=$(lncli taker addinvoice --amt "$sats" --preimage "$preimage" \
-    --memo "submarine swap" \
+    --memo "btc2ln swap" \
     | grep -oE '"payment_request" *: *"[^"]*"' | head -1 | sed 's/.*: *"//;s/"$//')
   [ -n "$bolt" ] || fail "the taker's node produced no invoice"
   echo "$preimage $hash $bolt"
@@ -39,7 +39,7 @@ taker_terms() {
 # Sets OFFER, ID, DEPOSIT, ADDRESS and CLAIM_PUBKEY.
 offer() {
   local locktime="$1" bolt="$2" refund_pubkey="$3"
-  OFFER=$(maker submarine-offer --dir "$STORE" --invoice "$bolt" \
+  OFFER=$(maker btc2ln-offer --dir "$STORE" --invoice "$bolt" \
     --refund-pubkey "$refund_pubkey" --locktime "$locktime" \
     --fee "$FEE" --claim-fee "$CLAIM_FEE") || return 1
   ID=$(printf '%s\n' "$OFFER" | field id)
@@ -79,19 +79,19 @@ echo "address: the taker's own HTLC, funded by the taker alone"
 
 echo "== the deposit is funded, confirmed and paid for =="
 read -r TXID VOUT _ <<< "$(fund_htlc "$ADDRESS" "$DEPOSIT")"
-maker submarine-funded --dir "$STORE" --id "$ID" --outpoint "$TXID:$VOUT" > /dev/null
+maker btc2ln-funded --dir "$STORE" --id "$ID" --outpoint "$TXID:$VOUT" > /dev/null
 mine 1
 
 # One sweep pays, the next claims: the tick plans from what it knew, and the
 # preimage only exists once the payment has settled.
-maker submarine-run --dir "$STORE" --once
-maker submarine-run --dir "$STORE" --once
+maker btc2ln-run --dir "$STORE" --once
+maker btc2ln-run --dir "$STORE" --once
 
 STATE=$(swapx ln state --node taker --payment-hash "$HASH" | field state)
 [ "$STATE" = "SETTLED" ] || fail "the taker's invoice is $STATE, not SETTLED"
 echo "invoice: the maker paid it, revealing the preimage"
 
-CLAIM_TXID=$(maker submarine-status --dir "$STORE" --id "$ID" | field claim_txid)
+CLAIM_TXID=$(maker btc2ln-status --dir "$STORE" --id "$ID" | field claim_txid)
 [ "$CLAIM_TXID" != "-" ] || fail "the maker never claimed the deposit"
 mine 1
 [ -z "$(btc gettxout "$TXID" "$VOUT" 2>/dev/null)" ] \
@@ -124,11 +124,11 @@ LATE_ID=$ID LATE_DEPOSIT=$DEPOSIT LATE_ADDRESS=$ADDRESS
 # refund, then funds anyway. The deposit is valid; the payment would not be.
 mine 60
 read -r LATE_TXID LATE_VOUT _ <<< "$(fund_htlc "$LATE_ADDRESS" "$LATE_DEPOSIT")"
-maker submarine-funded --dir "$STORE" --id "$LATE_ID" \
+maker btc2ln-funded --dir "$STORE" --id "$LATE_ID" \
   --outpoint "$LATE_TXID:$LATE_VOUT" > /dev/null
 mine 1
 
-SWEEP=$(maker submarine-run --dir "$STORE" --once 2>&1)
+SWEEP=$(maker btc2ln-run --dir "$STORE" --once 2>&1)
 printf '%s\n' "$SWEEP" | grep -q "too_late_to_pay" \
   || fail "a late deposit was not refused: $SWEEP"
 LATE_STATE=$(swapx ln state --node taker --payment-hash "$LATE_HASH" | field state)
@@ -149,4 +149,4 @@ mine 1
   || fail "the refused deposit is still unspent after the refund"
 echo "refund:  the deposit is back in the taker's wallet"
 
-echo "ok: submarine swap funded, paid, claimed, and an unsafe one refused"
+echo "ok: btc2ln swap funded, paid, claimed, and an unsafe one refused"

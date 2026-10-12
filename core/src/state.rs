@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// Where a swap is in its lifecycle.
 ///
 /// `Initiator` is the party who commits value first; `counterparty` is the
-/// other side. For a submarine swap the initiator is the taker funding the
+/// other side. For a btc2ln swap the initiator is the taker funding the
 /// on-chain HTLC.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

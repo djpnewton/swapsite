@@ -1,4 +1,4 @@
-//! The maker side of a reverse submarine swap.
+//! The maker side of an ln2btc swap: the taker pays Lightning, the maker
 //!
 //! The maker deposits on chain first, then waits for the taker's Lightning
 //! payment to be held. If the taker pays, the maker settles and so reveals the
@@ -21,7 +21,7 @@ use crate::state::{Event, StateError, SwapState};
 /// Holds the preimage and the refund secret, so this record is a hot key. On
 /// regtest that is fine; a real maker would keep these in a signer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SwapRecord {
+pub struct Ln2btcRecord {
     pub id: String,
     pub payment_hash: PaymentHash,
     pub preimage: Preimage,
@@ -68,14 +68,14 @@ pub struct SwapRecord {
     /// Persisted before it is broadcast, so a crash can always be recovered
     /// from by rebroadcasting.
     pub funding_tx: Option<String>,
-    pub funding: Option<Funding>,
+    pub funding: Option<Ln2btcFunding>,
     /// Signed refund transaction, hex, persisted for the same reason.
     pub refund_tx: Option<String>,
     pub state: SwapState,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Funding {
+pub struct Ln2btcFunding {
     pub txid: String,
     pub vout: u32,
     pub sats: u64,
@@ -115,7 +115,7 @@ pub enum Action {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RecordError {
+pub enum Ln2btcError {
     #[error("bad `{field}` in swap record: {reason}")]
     Field { field: &'static str, reason: String },
     #[error("swap has no funding outpoint yet")]
@@ -140,7 +140,7 @@ fn default_cltv_delta() -> u32 {
 /// Lightning network, so from that moment it is public and a taker who paid
 /// from another wallet can claim with it instead of carrying it across by hand.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct PublicSwap {
+pub struct Ln2btcPublicSwap {
     pub id: String,
     pub state: SwapState,
     /// What the taker receives on chain.
@@ -180,10 +180,10 @@ pub struct PublicSwap {
     pub preimage: Option<String>,
 }
 
-impl SwapRecord {
+impl Ln2btcRecord {
     /// What the maker may tell anyone about this swap.
-    pub fn public(&self) -> Result<PublicSwap, RecordError> {
-        Ok(PublicSwap {
+    pub fn public(&self) -> Result<Ln2btcPublicSwap, Ln2btcError> {
+        Ok(Ln2btcPublicSwap {
             id: self.id.clone(),
             state: self.state,
             amount_sat: self.amount_sat,
@@ -215,26 +215,26 @@ impl SwapRecord {
         self.amount_sat + self.fee_sat
     }
 
-    fn field<T: FromStr>(&self, name: &'static str, value: &str) -> Result<T, RecordError>
+    fn field<T: FromStr>(&self, name: &'static str, value: &str) -> Result<T, Ln2btcError>
     where
         T::Err: std::fmt::Display,
     {
-        T::from_str(value).map_err(|e| RecordError::Field {
+        T::from_str(value).map_err(|e| Ln2btcError::Field {
             field: name,
             reason: e.to_string(),
         })
     }
 
-    pub fn claim_pubkey(&self) -> Result<PublicKey, RecordError> {
+    pub fn claim_pubkey(&self) -> Result<PublicKey, Ln2btcError> {
         self.field("claim_pubkey", &self.claim_pubkey)
     }
 
-    pub fn refund_pubkey(&self) -> Result<PublicKey, RecordError> {
+    pub fn refund_pubkey(&self) -> Result<PublicKey, Ln2btcError> {
         self.field("refund_pubkey", &self.refund_pubkey)
     }
 
     /// The maker's refund secret. Never leaves the maker.
-    pub fn refund_key(&self) -> Result<SecretKey, RecordError> {
+    pub fn refund_key(&self) -> Result<SecretKey, Ln2btcError> {
         self.field("refund_secret", &self.refund_secret)
     }
 
@@ -244,7 +244,7 @@ impl SwapRecord {
     }
 
     /// Rebuild the HTLC this swap is locked to.
-    pub fn htlc(&self) -> Result<Htlc, RecordError> {
+    pub fn htlc(&self) -> Result<Htlc, Ln2btcError> {
         Ok(Htlc::from_height(
             self.payment_hash,
             self.claim_pubkey()?,
@@ -253,16 +253,16 @@ impl SwapRecord {
         )?)
     }
 
-    pub fn funding(&self) -> Result<&Funding, RecordError> {
-        self.funding.as_ref().ok_or(RecordError::NotFunded)
+    pub fn funding(&self) -> Result<&Ln2btcFunding, Ln2btcError> {
+        self.funding.as_ref().ok_or(Ln2btcError::NotFunded)
     }
 
-    pub fn funding_txid(&self) -> Result<Txid, RecordError> {
+    pub fn funding_txid(&self) -> Result<Txid, Ln2btcError> {
         let funding = self.funding()?;
         self.field("funding.txid", &funding.txid)
     }
 
-    pub fn funding_outpoint(&self) -> Result<OutPoint, RecordError> {
+    pub fn funding_outpoint(&self) -> Result<OutPoint, Ln2btcError> {
         let funding = self.funding()?;
         Ok(OutPoint {
             txid: self.field("funding.txid", &funding.txid)?,
@@ -271,16 +271,16 @@ impl SwapRecord {
     }
 
     /// Txid of the refund, if one has been built.
-    pub fn refund_txid(&self) -> Result<Option<Txid>, RecordError> {
+    pub fn refund_txid(&self) -> Result<Option<Txid>, Ln2btcError> {
         self.refund_tx
             .as_deref()
             .map(|hex| {
-                let bytes = hex::decode(hex).map_err(|e| RecordError::Field {
+                let bytes = hex::decode(hex).map_err(|e| Ln2btcError::Field {
                     field: "refund_tx",
                     reason: e.to_string(),
                 })?;
                 let tx: bitcoin::Transaction =
-                    bitcoin::consensus::deserialize(&bytes).map_err(|e| RecordError::Field {
+                    bitcoin::consensus::deserialize(&bytes).map_err(|e| Ln2btcError::Field {
                         field: "refund_tx",
                         reason: e.to_string(),
                     })?;
@@ -290,13 +290,13 @@ impl SwapRecord {
     }
 
     /// Move the stored state forward.
-    pub fn advance(&mut self, event: Event) -> Result<SwapState, RecordError> {
+    pub fn advance(&mut self, event: Event) -> Result<SwapState, Ln2btcError> {
         self.state = self.state.on(event)?;
         Ok(self.state)
     }
 
     /// Adopt a terminal state seen from outside, for crash recovery.
-    pub fn restore(&mut self, observed: SwapState) -> Result<SwapState, RecordError> {
+    pub fn restore(&mut self, observed: SwapState) -> Result<SwapState, Ln2btcError> {
         self.state = self.state.restore(observed)?;
         Ok(self.state)
     }
@@ -306,7 +306,7 @@ impl SwapRecord {
 ///
 /// Terminal facts win over the local record: a swap that is settled or refunded
 /// on the network cannot be un-finished by a stale file.
-pub fn reconcile(record: &mut SwapRecord, observed: &Observed) -> Result<(), RecordError> {
+pub fn reconcile(record: &mut Ln2btcRecord, observed: &Observed) -> Result<(), Ln2btcError> {
     if observed.invoice == InvoiceState::Settled {
         record.restore(SwapState::Settled)?;
         return Ok(());
@@ -333,7 +333,7 @@ pub fn reconcile(record: &mut SwapRecord, observed: &Observed) -> Result<(), Rec
 /// Decide what to do about one swap.
 ///
 /// Run [`reconcile`] first, so `record.state` already reflects reality.
-pub fn plan(record: &SwapRecord, observed: &Observed) -> Action {
+pub fn plan(record: &Ln2btcRecord, observed: &Observed) -> Action {
     // Reality first: a settled invoice ends the swap wherever we thought we were.
     if observed.invoice == InvoiceState::Settled || record.state.is_terminal() {
         return Action::Done;
@@ -384,7 +384,7 @@ mod tests {
     use super::*;
     use bitcoin::{secp256k1::Secp256k1, PublicKey};
 
-    fn record(locktime: u32) -> SwapRecord {
+    fn record(locktime: u32) -> Ln2btcRecord {
         let secp = Secp256k1::new();
         let mut rng = bitcoin::secp256k1::rand::thread_rng();
         let refund = SecretKey::new(&mut rng);
@@ -400,7 +400,7 @@ mod tests {
         )
         .unwrap();
 
-        SwapRecord {
+        Ln2btcRecord {
             id: "test".to_owned(),
             payment_hash: preimage.payment_hash(),
             preimage,
@@ -420,7 +420,7 @@ mod tests {
             bolt11: "lnbcrt1...".to_owned(),
             bond_bolt11: "lnbcrt1bond...".to_owned(),
             funding_tx: Some("00".to_owned()),
-            funding: Some(Funding {
+            funding: Some(Ln2btcFunding {
                 txid: "00".repeat(32),
                 vout: 0,
                 sats: 32_000,
@@ -514,7 +514,7 @@ mod tests {
         // written before this field existed.
         let record = record(500);
         let json = serde_json::to_string(&record.public().unwrap()).unwrap();
-        let parsed: PublicSwap = serde_json::from_str(&json).unwrap();
+        let parsed: Ln2btcPublicSwap = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, record.public().unwrap());
         assert!(parsed.preimage.is_none());
     }

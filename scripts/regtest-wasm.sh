@@ -21,11 +21,11 @@ cleanup() {
   # Allowed to find nothing: a non-zero kill or pkill under `set -e` would take
   # the exit status with it.
   [ -n "$RELAY_PID" ] && kill "$RELAY_PID" 2>/dev/null || true
-  pkill -f "maker run --dir $SWAPS" 2>/dev/null || true
+  pkill -f "maker ln2btc-run --dir $SWAPS" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-pkill -f 'maker run --dir' 2>/dev/null || true
+pkill -f 'maker ln2btc-run --dir' 2>/dev/null || true
 
 echo "== build the wasm module =="
 cargo build --quiet --release --target wasm32-unknown-unknown -p swapsite-wasm
@@ -56,7 +56,7 @@ echo "pubkey:        ${TAKER_PUBKEY:0:24}..."
 
 echo
 echo "== maker creates the swap =="
-NEW=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
+NEW=$(maker ln2btc-new --dir "$SWAPS" --amount "$AMOUNT" \
   --claim-pubkey "$TAKER_PUBKEY" 2>/dev/null)
 ID=$(printf '%s\n' "$NEW" | field id)
 BOLT11=$(printf '%s\n' "$NEW" | field bolt11)
@@ -72,7 +72,7 @@ echo "deposit:       not funded yet, and no daemon is running"
 
 echo
 echo "== the daemon funds it, but only once the bond is in =="
-maker run --dir "$SWAPS" --interval 1 > "$WORK/maker.out" 2> "$WORK/maker.err" &
+maker ln2btc-run --dir "$SWAPS" --interval 1 > "$WORK/maker.out" 2> "$WORK/maker.err" &
 read -r DEPOSIT _ <<< "$(bond_and_fund "$SWAPS" "$ID" "$BOND")"
 mine 1
 echo "deposit:       $DEPOSIT (funded after the bond, not before)"

@@ -1,6 +1,6 @@
 //! `maker` - the maker daemon and its control plane.
 //!
-//! Drives the maker's side of reverse submarine swaps from observed reality.
+//! Drives the maker's side of reverse btc2ln swaps from observed reality.
 //! Every signed transaction is written to the swap record before it is
 //! broadcast, so a crash is always recoverable by starting the daemon again.
 
@@ -26,14 +26,16 @@ use swapsite_core::{
     hash::Preimage,
     htlc::Htlc,
     lightning::{InvoiceState, LightningNode},
-    maker::{plan, reconcile, Action, Funding, Observed, PublicSwap, SwapRecord},
+    maker_btc2ln::{self, Btc2lnRecord},
+    maker_ln2btc::{
+        plan, reconcile, Action, Ln2btcFunding, Ln2btcPublicSwap, Ln2btcRecord, Observed,
+    },
     params::{
         LegTimelocks, DEFAULT_CLTV_DELTA, DEFAULT_LOCKTIME_MARGIN, MIN_MARGIN_BLOCKS,
         PAYMENT_WINDOW_BLOCKS,
     },
     spend,
     state::{Event, SwapState},
-    submarine::{self, SubmarineRecord},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -48,7 +50,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Create a swap: fund the on-chain leg and issue the hold invoice.
-    NewSwap {
+    Ln2btcNew {
         #[command(flatten)]
         config: NodeConfig,
         /// What the taker pays over Lightning, in satoshis.
@@ -86,7 +88,7 @@ enum Cmd {
     },
 
     /// Run the daemon: watch every swap and act on it.
-    Run {
+    Ln2btcRun {
         #[command(flatten)]
         config: NodeConfig,
         /// Run a single tick and exit.
@@ -95,7 +97,7 @@ enum Cmd {
     },
 
     /// Print what is known about the swaps on disk.
-    Status {
+    Ln2btcStatus {
         #[command(flatten)]
         config: NodeConfig,
         /// Show only this swap.
@@ -104,7 +106,7 @@ enum Cmd {
     },
 
     /// Run the daemon and serve its control plane.
-    Serve {
+    Ln2btcServe {
         #[command(flatten)]
         config: NodeConfig,
         /// Address to listen on.
@@ -112,8 +114,8 @@ enum Cmd {
         listen: String,
     },
 
-    /// Offer a submarine swap: the taker deposits first, we pay its invoice.
-    SubmarineOffer {
+    /// Offer a btc2ln swap: the taker deposits first, we pay its invoice.
+    Btc2lnOffer {
         #[command(flatten)]
         config: NodeConfig,
         /// The taker's invoice, which our payment settles.
@@ -134,7 +136,7 @@ enum Cmd {
     },
 
     /// Record a deposit a taker reports, after checking it pays the HTLC.
-    SubmarineFunded {
+    Btc2lnFunded {
         #[command(flatten)]
         config: NodeConfig,
         /// The swap id: the invoice's payment hash.
@@ -145,8 +147,8 @@ enum Cmd {
         outpoint: String,
     },
 
-    /// Run the submarine half of the daemon: pay invoices, claim deposits.
-    SubmarineRun {
+    /// Run the btc2ln half of the daemon: pay invoices, claim deposits.
+    Btc2lnRun {
         #[command(flatten)]
         config: NodeConfig,
         /// Run a single sweep and exit.
@@ -154,8 +156,8 @@ enum Cmd {
         once: bool,
     },
 
-    /// Print the submarine swaps on disk.
-    SubmarineStatus {
+    /// Print the btc2ln swaps on disk.
+    Btc2lnStatus {
         #[command(flatten)]
         config: NodeConfig,
         /// Show only this swap.
@@ -237,18 +239,18 @@ impl NodeConfig {
         Ok(SwapStore::open(&self.dir)?)
     }
 
-    /// The store for the submarine direction's swaps.
+    /// The store for the btc2ln direction's swaps.
     ///
     /// A subdirectory of `--dir`, because a store is typed to one kind of
     /// record: both directions in one directory would be read as one.
-    fn submarine_store(&self) -> Result<SwapStore<SubmarineRecord>> {
-        Ok(SwapStore::open(self.dir.join("submarine"))?)
+    fn btc2ln_store(&self) -> Result<SwapStore<Btc2lnRecord>> {
+        Ok(SwapStore::open(self.dir.join("btc2ln"))?)
     }
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::NewSwap {
+        Cmd::Ln2btcNew {
             config,
             amount,
             fee,
@@ -273,33 +275,33 @@ fn main() -> Result<()> {
                 cltv_delta,
             },
         ),
-        Cmd::Run { config, once } => run(&config, once),
-        Cmd::Status { config, id } => status(&config, id.as_deref()),
-        Cmd::Serve { config, listen } => serve(&config, &listen),
-        Cmd::SubmarineOffer {
+        Cmd::Ln2btcRun { config, once } => run(&config, once),
+        Cmd::Ln2btcStatus { config, id } => status(&config, id.as_deref()),
+        Cmd::Ln2btcServe { config, listen } => serve(&config, &listen),
+        Cmd::Btc2lnOffer {
             config,
             invoice,
             refund_pubkey,
             locktime,
             fee,
             claim_fee,
-        } => submarine_offer(&config, &invoice, &refund_pubkey, locktime, fee, claim_fee),
-        Cmd::SubmarineFunded {
+        } => btc2ln_offer(&config, &invoice, &refund_pubkey, locktime, fee, claim_fee),
+        Cmd::Btc2lnFunded {
             config,
             id,
             outpoint,
-        } => submarine_funded(&config, &id, &outpoint),
-        Cmd::SubmarineRun { config, once } => submarine_run(&config, once),
-        Cmd::SubmarineStatus { config, id } => submarine_status(&config, id.as_deref()),
+        } => btc2ln_funded(&config, &id, &outpoint),
+        Cmd::Btc2lnRun { config, once } => btc2ln_run(&config, once),
+        Cmd::Btc2lnStatus { config, id } => btc2ln_status(&config, id.as_deref()),
     }
 }
 
-/// Offer a submarine swap: the taker deposits on chain, we pay its invoice.
+/// Offer a btc2ln swap: the taker deposits on chain, we pay its invoice.
 ///
 /// Nothing is deposited yet, and nothing can be: the terms are measured against
 /// the chain's own height first, so a locktime that would leave a late payment
 /// unclaimable is refused rather than offered.
-fn submarine_offer(
+fn btc2ln_offer(
     config: &NodeConfig,
     invoice: &str,
     refund_pubkey: &str,
@@ -309,14 +311,14 @@ fn submarine_offer(
 ) -> Result<()> {
     let chain = config.chain()?;
     let lightning = config.lightning()?;
-    let store = config.submarine_store()?;
+    let store = config.btc2ln_store()?;
 
     let decoded = lightning.decode_invoice(invoice)?;
     if decoded.sats == 0 {
         return Err("refusing to offer this swap: the invoice is for no amount".into());
     }
     let height = chain.height()?;
-    submarine::check_locktime(locktime, height, decoded.cltv_delta, PAYMENT_WINDOW_BLOCKS)
+    maker_btc2ln::check_locktime(locktime, height, decoded.cltv_delta, PAYMENT_WINDOW_BLOCKS)
         .map_err(|e| {
             format!(
                 "refusing to offer this swap: the deposit could be refunded before a payment \
@@ -328,11 +330,11 @@ fn submarine_offer(
     let mut rng = bitcoin::secp256k1::rand::thread_rng();
     let claim_key = SecretKey::new(&mut rng);
 
-    let record = SubmarineRecord {
+    let record = Btc2lnRecord {
         id: decoded.payment_hash.clone(),
         invoice: invoice.to_owned(),
         receive_sat: decoded.sats,
-        deposit_sat: submarine::deposit_sat(decoded.sats, fee, claim_fee),
+        deposit_sat: maker_btc2ln::deposit_sat(decoded.sats, fee, claim_fee),
         fee_sat: fee,
         claim_fee_sat: claim_fee,
         claim_secret: hex::encode(claim_key.secret_bytes()),
@@ -353,7 +355,7 @@ fn submarine_offer(
     store.save(&record)?;
 
     eprintln!(
-        "submarine swap offered: {} sat on chain for {} over Lightning",
+        "btc2ln swap offered: {} sat on chain for {} over Lightning",
         record.deposit_sat, record.receive_sat
     );
     println!("id={}", record.id);
@@ -372,9 +374,9 @@ fn submarine_offer(
 /// The maker is told the outpoint rather than looking for it: finding an output
 /// by address would need an index. Nothing is taken on trust here, since the
 /// transaction is fetched and its script and amount are checked.
-fn submarine_funded(config: &NodeConfig, id: &str, outpoint: &str) -> Result<()> {
+fn btc2ln_funded(config: &NodeConfig, id: &str, outpoint: &str) -> Result<()> {
     let chain = config.chain()?;
-    let store = config.submarine_store()?;
+    let store = config.btc2ln_store()?;
     let mut record = store.load(id)?;
     if record.deposit.is_some() {
         return Err(format!("swap {id} already has a deposit").into());
@@ -410,10 +412,10 @@ fn submarine_funded(config: &NodeConfig, id: &str, outpoint: &str) -> Result<()>
     Ok(())
 }
 
-/// The submarine half of the daemon loop.
-fn submarine_run(config: &NodeConfig, once: bool) -> Result<()> {
+/// The btc2ln half of the daemon loop.
+fn btc2ln_run(config: &NodeConfig, once: bool) -> Result<()> {
     loop {
-        submarine_sweep(config)?;
+        btc2ln_sweep(config)?;
         if once {
             return Ok(());
         }
@@ -421,12 +423,12 @@ fn submarine_run(config: &NodeConfig, once: bool) -> Result<()> {
     }
 }
 
-/// One pass over every submarine swap: pay what can be paid, claim what is
+/// One pass over every btc2ln swap: pay what can be paid, claim what is
 /// known.
-fn submarine_sweep(config: &NodeConfig) -> Result<()> {
+fn btc2ln_sweep(config: &NodeConfig) -> Result<()> {
     let chain = config.chain()?;
     let lightning = config.lightning()?;
-    let store = config.submarine_store()?;
+    let store = config.btc2ln_store()?;
     let height = chain.height()?;
     let unix_now = unix_now()?;
 
@@ -436,39 +438,39 @@ fn submarine_sweep(config: &NodeConfig) -> Result<()> {
             .deposit
             .map(|outpoint| chain.confirmations(&outpoint.txid).ok())
             .unwrap_or_default();
-        let observed = submarine::Observed {
+        let observed = maker_btc2ln::Observed {
             height,
             unix_now,
             confirmations,
         };
 
-        match submarine::plan(&record, observed) {
-            submarine::Action::Wait(why) => eprintln!("[submarine] {id}: {why}"),
-            submarine::Action::Done => {}
-            submarine::Action::TooLateToPay { blocks_left } => eprintln!(
-                "[submarine] {id}: too_late_to_pay: a payment now would expire too close to \
+        match maker_btc2ln::plan(&record, observed) {
+            maker_btc2ln::Action::Wait(why) => eprintln!("[btc2ln] {id}: {why}"),
+            maker_btc2ln::Action::Done => {}
+            maker_btc2ln::Action::TooLateToPay { blocks_left } => eprintln!(
+                "[btc2ln] {id}: too_late_to_pay: a payment now would expire too close to \
                  the refund at {}, which leaves {blocks_left} blocks of room",
                 record.locktime
             ),
-            submarine::Action::InvoiceExpired => eprintln!(
-                "[submarine] {id}: invoice_expired: the invoice expired before the deposit \
+            maker_btc2ln::Action::InvoiceExpired => eprintln!(
+                "[btc2ln] {id}: invoice_expired: the invoice expired before the deposit \
                  arrived, so the taker has to refund it"
             ),
-            submarine::Action::Pay => match lightning.pay(&record.invoice) {
+            maker_btc2ln::Action::Pay => match lightning.pay(&record.invoice) {
                 Ok(preimage) => {
                     record.preimage = Some(preimage.to_hex());
                     store.save(&record)?;
                     eprintln!(
-                        "[submarine] {id}: paid {} sat, the preimage is known",
+                        "[btc2ln] {id}: paid {} sat, the preimage is known",
                         record.receive_sat
                     );
                 }
                 // A failed payment costs nothing: the invoice is unpaid and the
                 // deposit is still there to try again, or for the taker to
                 // refund. Paying is refused above once that stops being true.
-                Err(e) => eprintln!("[submarine] {id}: payment failed: {e}"),
+                Err(e) => eprintln!("[btc2ln] {id}: payment failed: {e}"),
             },
-            submarine::Action::Claim => {
+            maker_btc2ln::Action::Claim => {
                 let preimage = record
                     .preimage()?
                     .ok_or("the claim was planned without a preimage")?;
@@ -486,7 +488,7 @@ fn submarine_sweep(config: &NodeConfig) -> Result<()> {
                 record.claim_txid = Some(txid.to_string());
                 store.save(&record)?;
                 eprintln!(
-                    "[submarine] {id}: claimed {} sat to {to}",
+                    "[btc2ln] {id}: claimed {} sat to {to}",
                     record.deposit_sat - record.claim_fee_sat
                 );
             }
@@ -495,9 +497,9 @@ fn submarine_sweep(config: &NodeConfig) -> Result<()> {
     Ok(())
 }
 
-/// Print the submarine swaps on disk, one `key=value` line each.
-fn submarine_status(config: &NodeConfig, id: Option<&str>) -> Result<()> {
-    let store = config.submarine_store()?;
+/// Print the btc2ln swaps on disk, one `key=value` line each.
+fn btc2ln_status(config: &NodeConfig, id: Option<&str>) -> Result<()> {
+    let store = config.btc2ln_store()?;
     let ids = match id {
         Some(id) => vec![id.to_owned()],
         None => store.ids()?,
@@ -603,7 +605,7 @@ fn default_cltv_delta() -> u32 {
 /// The bond is collected first, deliberately. Funding before it is what makes
 /// walking away free: the taker would risk nothing while parking the maker's
 /// capital for the whole locktime, and pay nothing for the privilege.
-fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<SwapRecord> {
+fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<Ln2btcRecord> {
     let chain = config.chain()?;
     let lightning = config.lightning()?;
     let store = config.store()?;
@@ -657,7 +659,7 @@ fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<SwapReco
     let bond_bolt11 =
         lightning.add_invoice_with(&preimage.bond_preimage(), request.bond_fee, "swap bond")?;
 
-    let record = SwapRecord {
+    let record = Ln2btcRecord {
         id: preimage.payment_hash().to_hex(),
         payment_hash: preimage.payment_hash(),
         preimage,
@@ -689,7 +691,7 @@ fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<SwapReco
 }
 
 /// Fund and broadcast the on-chain leg. Only ever called once the bond is in.
-fn fund_swap(record: &mut SwapRecord, config: &NodeConfig, chain: &BitcoinRpc) -> Result<()> {
+fn fund_swap(record: &mut Ln2btcRecord, config: &NodeConfig, chain: &BitcoinRpc) -> Result<()> {
     let address = record.htlc()?.address(config.network()?);
     let funding = chain.fund(&address, Amount::from_sat(record.deposit_sat))?;
 
@@ -703,7 +705,7 @@ fn fund_swap(record: &mut SwapRecord, config: &NodeConfig, chain: &BitcoinRpc) -
         .ok_or("the funded transaction does not pay the HTLC")?;
 
     record.funding_tx = Some(serialize_hex(&funding));
-    record.funding = Some(Funding {
+    record.funding = Some(Ln2btcFunding {
         txid: funding.compute_txid().to_string(),
         vout,
         sats,
@@ -791,7 +793,7 @@ fn serve(config: &NodeConfig, listen: &str) -> Result<()> {
 /// The maker's control plane.
 ///
 /// Everything a coordinator or a taker may see, and nothing they may not: swaps
-/// leave here through [`SwapRecord::public`], so the preimage and the refund
+/// leave here through [`Ln2btcRecord::public`], so the preimage and the refund
 /// secret cannot escape by accident.
 struct Api {
     config: NodeConfig,
@@ -812,7 +814,7 @@ impl Api {
     }
 
     fn list(&self) -> Response {
-        let swaps = (|| -> Result<Vec<PublicSwap>> {
+        let swaps = (|| -> Result<Vec<Ln2btcPublicSwap>> {
             let store = self.config.store()?;
             let mut swaps = Vec::new();
             for record in store.all()? {
@@ -828,7 +830,8 @@ impl Api {
     }
 
     fn show(&self, id: &str) -> Response {
-        let swap = (|| -> Result<PublicSwap> { Ok(self.config.store()?.load(id)?.public()?) })();
+        let swap =
+            (|| -> Result<Ln2btcPublicSwap> { Ok(self.config.store()?.load(id)?.public()?) })();
 
         match swap {
             Ok(swap) => Response::json(200, &json!(swap)),
@@ -920,7 +923,7 @@ fn tick(config: &NodeConfig) -> Result<()> {
 
 /// Read the state of the world for one swap. Never guesses from the record.
 fn observe(
-    record: &SwapRecord,
+    record: &Ln2btcRecord,
     chain: &BitcoinRpc,
     lightning: &LnCli,
     height: u32,
@@ -960,7 +963,7 @@ fn observe(
 }
 
 /// Build and record the refund, but do not broadcast it.
-fn build_refund(record: &mut SwapRecord, chain: &BitcoinRpc) -> Result<()> {
+fn build_refund(record: &mut Ln2btcRecord, chain: &BitcoinRpc) -> Result<()> {
     let destination: Address = chain.new_address()?;
     let tx = swapsite_core::spend::refund(
         &record.htlc()?,
@@ -1012,7 +1015,7 @@ fn status(config: &NodeConfig, id: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn note(record: &SwapRecord, message: String) {
+fn note(record: &Ln2btcRecord, message: String) {
     eprintln!("[maker] {} {} {}", record.id, record.state, message);
 }
 

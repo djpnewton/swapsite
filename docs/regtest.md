@@ -48,7 +48,7 @@ that is rejected early and then accepted after the timeout):
 To run one complete swap, both legs, plus the canceled-invoice failure path:
 
 ```bash
-./scripts/regtest-swap.sh
+./scripts/regtest-ln2btc.sh
 ```
 
 To run the maker daemon end to end (a cold-start settle, and a timed refund):
@@ -78,11 +78,13 @@ down to the block, and a maker that refunds a deposit it was already paid for:
 ./scripts/regtest-recovery.sh
 ```
 
-To run the other direction, where the taker deposits on chain first and the
-maker pays its invoice over Lightning, with no bond in that direction:
+To run the btc2ln direction, where the taker deposits on chain first and the
+maker pays its invoice over Lightning, with no bond in that direction. The maker
+drives it by hand with `btc2ln-offer`, then `btc2ln-funded` once the taker
+reports its outpoint, then `btc2ln-run --once` to pay and claim (or as a daemon):
 
 ```bash
-./scripts/regtest-submarine.sh
+./scripts/regtest-btc2ln.sh
 ```
 
 All eight scripts source `scripts/lib.sh`, which builds the binaries once and
@@ -340,7 +342,7 @@ have to agree. Settling *is* the reveal: a hold invoice is settled by handing
 over the preimage, which is what tells the Lightning network the payment is
 claimable, so the preimage is public from that moment. A maker that withheld it
 would not be protecting anything - it would only be costing a taker who paid from
-another wallet a manual copy-paste. So `PublicSwap` carries the preimage on a
+another wallet a manual copy-paste. So `Ln2btcPublicSwap` carries the preimage on a
 **settled** swap and on nothing else, and the field is absent rather than null
 before then, so a swap's public view cannot be read as "the secret is out".
 

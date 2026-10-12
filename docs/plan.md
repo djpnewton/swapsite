@@ -23,7 +23,7 @@ hashlocked leg** - instantiated on two kinds of backend:
 
 A swap is any pair of legs sharing one preimage `H`.
 
-- **BTC <-> LN** and **L-BTC <-> LN** are both submarine swaps. L-BTC is just a
+- **BTC <-> LN** and **L-BTC <-> LN** are both swaps. L-BTC is just a
   different on-chain backend (1 min blocks, confidential outputs).
 - **BTC <-> L-BTC** is the same idea with two on-chain legs and no LN.
 - Adding a pair is configuration, not a new protocol.
@@ -39,10 +39,10 @@ chain. Never use equal timeouts. Per-chain margins: BTC ~10 min blocks
 
 **Direction naming.** Each pair has two directions:
 
-- *Submarine* - user pays on-chain, receives Lightning (or pays a third-party
+- *btc2ln* - user pays on-chain, receives Lightning (or pays a third-party
   invoice). The preimage-claim path belongs to the maker; the user's only
   fallback is the timelocked refund.
-- *Reverse submarine* - user pays Lightning, receives on-chain. The
+- *ln2btc* - user pays Lightning, receives on-chain. The
   preimage-claim path belongs to the user.
 
 ## 3. Roles
@@ -167,7 +167,7 @@ flowchart LR
 | M3 | L-BTC legs: elements regtest, LWK signer. L-BTC <-> LN falls out of M1. | not started |
 | M4 | BTC <-> L-BTC direct: two on-chain legs, no LN, chain-aware margins. | not started |
 | M5 | Multiple makers, Nostr discovery. | not started |
-| M6 | Submarine direction (BTC on chain to LN): the taker deposits first, no bond. | done, see [regtest.md](regtest.md) |
+| M6 | btc2ln direction (BTC on chain to LN): the taker deposits first, no bond. | done, see [regtest.md](regtest.md) |
 
 Registry of decisions:
 
@@ -197,7 +197,7 @@ Registry of decisions:
   profit. This is the arrangement the Lightning Engineering pages describe as a
   "non-refundable Lightning payment upfront ... to compensate for the
   opportunity cost of funds being locked up".
-- **The submarine direction has no bond.** The taker's deposit is the
+- **The btc2ln direction has no bond.** The taker's deposit is the
   collateral: a taker that walks away has parked its own money until the
   locktime, so the maker is not exposed to a free option the way it is when it
   funds first. The mirror of that option is the maker's, which is why it may pay
@@ -264,7 +264,7 @@ Registry of decisions:
 
 ## 9. Risks and open questions
 
-- Submarine claim timing: the maker pays only with `MIN_MARGIN_BLOCKS` between
+- btc2ln claim timing: the maker pays only with `MIN_MARGIN_BLOCKS` between
   the payment's expiry and the taker's locktime, so a claim always has room to
   land first. If the maker stalls past that room the taker refunds and keeps the
   payment, the asymmetry the reverse direction's bond exists to reduce.

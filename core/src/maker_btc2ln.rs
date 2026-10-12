@@ -1,4 +1,4 @@
-//! The submarine direction: a taker pays on chain and is paid over Lightning.
+//! The btc2ln direction: a taker pays on chain and is paid over Lightning.
 //!
 //! The taker funds an HTLC whose hash is the payment hash of its own invoice,
 //! so the deposit can only be taken by revealing the preimage over Lightning,
@@ -29,7 +29,7 @@ pub const DEPOSIT_CONFIRMATIONS: u32 = 2;
 
 /// A stored record is not usable.
 #[derive(Debug, thiserror::Error)]
-pub enum SubmarineError {
+pub enum Btc2lnError {
     #[error("{field} is not a valid {what}")]
     Malformed {
         field: &'static str,
@@ -67,9 +67,9 @@ pub fn check_locktime(
     .map(|_| ())
 }
 
-/// One submarine swap, as the maker knows it.
+/// One btc2ln swap, as the maker knows it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmarineRecord {
+pub struct Btc2lnRecord {
     /// The invoice's payment hash, which the HTLC also pays to. The id.
     pub id: String,
     /// The taker's invoice, paid once the deposit has confirmed.
@@ -101,37 +101,37 @@ pub struct SubmarineRecord {
     pub claim_txid: Option<String>,
 }
 
-impl SubmarineRecord {
-    fn malformed(field: &'static str, what: &'static str) -> SubmarineError {
-        SubmarineError::Malformed { field, what }
+impl Btc2lnRecord {
+    fn malformed(field: &'static str, what: &'static str) -> Btc2lnError {
+        Btc2lnError::Malformed { field, what }
     }
 
-    pub fn claim_key(&self) -> Result<SecretKey, SubmarineError> {
+    pub fn claim_key(&self) -> Result<SecretKey, Btc2lnError> {
         SecretKey::from_str(&self.claim_secret)
             .map_err(|_| Self::malformed("claim_secret", "secret key"))
     }
 
-    pub fn claim_pubkey(&self) -> Result<PublicKey, SubmarineError> {
+    pub fn claim_pubkey(&self) -> Result<PublicKey, Btc2lnError> {
         Ok(PublicKey::new(
             self.claim_key()?.public_key(&Secp256k1::new()),
         ))
     }
 
-    pub fn refund_key(&self) -> Result<PublicKey, SubmarineError> {
+    pub fn refund_key(&self) -> Result<PublicKey, Btc2lnError> {
         PublicKey::from_str(&self.refund_pubkey)
             .map_err(|_| Self::malformed("refund_pubkey", "public key"))
     }
 
-    pub fn payment_hash(&self) -> Result<PaymentHash, SubmarineError> {
+    pub fn payment_hash(&self) -> Result<PaymentHash, Btc2lnError> {
         PaymentHash::from_hex(&self.id).map_err(|_| Self::malformed("id", "payment hash"))
     }
 
     /// The deposit outpoint, once it is known.
-    pub fn outpoint(&self) -> Result<OutPoint, SubmarineError> {
-        self.deposit.ok_or(SubmarineError::NotFunded)
+    pub fn outpoint(&self) -> Result<OutPoint, Btc2lnError> {
+        self.deposit.ok_or(Btc2lnError::NotFunded)
     }
 
-    pub fn preimage(&self) -> Result<Option<Preimage>, SubmarineError> {
+    pub fn preimage(&self) -> Result<Option<Preimage>, Btc2lnError> {
         match &self.preimage {
             None => Ok(None),
             Some(hex) => Preimage::from_hex(hex)
@@ -141,7 +141,7 @@ impl SubmarineRecord {
     }
 
     /// The HTLC the taker has to fund: the maker claims it, the taker refunds.
-    pub fn htlc(&self) -> Result<Htlc, SubmarineError> {
+    pub fn htlc(&self) -> Result<Htlc, Btc2lnError> {
         Ok(Htlc::from_height(
             self.payment_hash()?,
             self.claim_pubkey()?,
@@ -150,7 +150,7 @@ impl SubmarineRecord {
         )?)
     }
 
-    pub fn address(&self, network: Network) -> Result<Address, SubmarineError> {
+    pub fn address(&self, network: Network) -> Result<Address, Btc2lnError> {
         Ok(self.htlc()?.address(network))
     }
 }
@@ -203,8 +203,8 @@ impl Action {
     }
 }
 
-/// Decide what to do with a submarine swap from observed reality.
-pub fn plan(record: &SubmarineRecord, observed: Observed) -> Action {
+/// Decide what to do with a btc2ln swap from observed reality.
+pub fn plan(record: &Btc2lnRecord, observed: Observed) -> Action {
     if record.claim_txid.is_some() {
         return Action::Done;
     }
@@ -249,14 +249,14 @@ mod tests {
 
     /// A swap whose deposit has been reported, with a locktime `margin` blocks
     /// beyond the last height a payment would be safe at.
-    fn record(margin: u32) -> SubmarineRecord {
+    fn record(margin: u32) -> Btc2lnRecord {
         let secp = Secp256k1::new();
         let preimage = Preimage::generate();
         let claim = key();
         let refund = key();
         let cltv_delta = 40;
         let locktime = 1000 + MIN_MARGIN_BLOCKS + cltv_delta + margin;
-        SubmarineRecord {
+        Btc2lnRecord {
             id: preimage.payment_hash().to_hex(),
             invoice: "lnbcrt1invoice".to_owned(),
             receive_sat: 1_000,
@@ -274,7 +274,7 @@ mod tests {
         }
     }
 
-    fn observed(record: &SubmarineRecord, confirmations: u32) -> Observed {
+    fn observed(record: &Btc2lnRecord, confirmations: u32) -> Observed {
         Observed {
             height: 1_000,
             unix_now: 1_700_000_000,

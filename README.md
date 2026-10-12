@@ -33,7 +33,8 @@ cargo test                       # unit tests, includes real script verification
 docker compose -f docker/docker-compose.yml up -d
 ./scripts/regtest-init.sh        # fund nodes, open a balanced channel
 ./scripts/regtest-onchain.sh     # fund, claim and refund an HTLC on-chain
-./scripts/regtest-swap.sh        # one complete swap, both legs, plus the failure path
+./scripts/regtest-ln2btc.sh      # one complete swap, both legs, plus the failure path
+./scripts/regtest-btc2ln.sh      # the other direction: taker deposits first, no bond
 ./scripts/regtest-maker.sh       # the daemon: bond, cold-start settle and timed refund
 ./scripts/regtest-wasm.sh        # the browser-side taker, through a relay
 ./scripts/regtest-coordinator.sh # the whole flow: quote, verify, pay, claim, recover

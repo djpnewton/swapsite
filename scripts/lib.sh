@@ -120,7 +120,7 @@ if funding:
 await_swap_state() {
   local id="$1" wanted="$2" store="$3" state=""
   for _ in $(seq 1 40); do
-    state=$(maker status --dir "$store" --id "$id" 2>/dev/null | field state) || true
+    state=$(maker ln2btc-status --dir "$store" --id "$id" 2>/dev/null | field state) || true
     [ "$state" = "$wanted" ] && { echo "$state"; return 0; }
     sleep 1
   done

@@ -55,8 +55,8 @@ if [ "$regtest" = 1 ]; then
   scripts=(
     regtest-init
     regtest-onchain
-    regtest-submarine
-    regtest-swap
+    regtest-btc2ln
+    regtest-ln2btc
     regtest-maker
     regtest-wasm
     regtest-coordinator

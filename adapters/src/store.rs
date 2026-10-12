@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use swapsite_core::maker::SwapRecord;
-use swapsite_core::submarine::SubmarineRecord;
+use swapsite_core::maker_btc2ln::Btc2lnRecord;
+use swapsite_core::maker_ln2btc::Ln2btcRecord;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -38,19 +38,19 @@ pub trait Stored {
     fn id(&self) -> &str;
 }
 
-impl Stored for SwapRecord {
+impl Stored for Ln2btcRecord {
     fn id(&self) -> &str {
         &self.id
     }
 }
 
-impl Stored for SubmarineRecord {
+impl Stored for Btc2lnRecord {
     fn id(&self) -> &str {
         &self.id
     }
 }
 
-pub struct SwapStore<T = SwapRecord> {
+pub struct SwapStore<T = Ln2btcRecord> {
     dir: PathBuf,
     _record: PhantomData<T>,
 }
@@ -142,7 +142,7 @@ mod tests {
     use bitcoin::{secp256k1::Secp256k1, Network, PublicKey};
     use swapsite_core::{Htlc, Preimage, SwapState};
 
-    fn record(id: &str) -> SwapRecord {
+    fn record(id: &str) -> Ln2btcRecord {
         let secp = Secp256k1::new();
         let mut rng = bitcoin::secp256k1::rand::thread_rng();
         let refund = bitcoin::secp256k1::SecretKey::new(&mut rng);
@@ -153,7 +153,7 @@ mod tests {
         let htlc =
             Htlc::from_height(preimage.payment_hash(), claim_pubkey, refund_pubkey, 500).unwrap();
 
-        SwapRecord {
+        Ln2btcRecord {
             id: id.to_owned(),
             payment_hash: preimage.payment_hash(),
             preimage,

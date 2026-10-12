@@ -26,7 +26,7 @@ cleanup() {
   # The patterns have to match what was actually run: the binaries live at
   # `target/debug/...`, so a pattern of `bin/relay` matches nothing at all.
   pkill -f 'relay --listen 127.0.0.1:3100' 2>/dev/null || true
-  pkill -f "maker serve --dir $SWAPS" 2>/dev/null || true
+  pkill -f "maker ln2btc-serve --dir $SWAPS" 2>/dev/null || true
   pkill -f 'coordinator serve --listen 127.0.0.1:8090' 2>/dev/null || true
   return 0
 }
@@ -34,7 +34,7 @@ trap cleanup EXIT
 
 # Nothing from an earlier run should still be holding a port or a record.
 pkill -f 'relay --listen 127.0.0.1:3100' 2>/dev/null || true
-pkill -f 'maker serve --dir' 2>/dev/null || true
+pkill -f 'maker ln2btc-serve --dir' 2>/dev/null || true
 pkill -f 'coordinator serve --listen 127.0.0.1:8090' 2>/dev/null || true
 sleep 0.5
 
@@ -54,7 +54,7 @@ echo "== build and start the three services =="
 cargo build --quiet --release --target wasm32-unknown-unknown -p swapsite-wasm
 
 "$BIN/relay" --listen 127.0.0.1:3100 > "$WORK/relay.out" 2>&1 &
-"$BIN/maker" serve --dir "$SWAPS" --listen 127.0.0.1:3200 > "$WORK/cmaker.out" 2>&1 &
+"$BIN/maker" ln2btc-serve --dir "$SWAPS" --listen 127.0.0.1:3200 > "$WORK/cmaker.out" 2>&1 &
 "$BIN/coordinator" serve --listen 127.0.0.1:8090 \
   --maker-url "$MAKER_URL" --relay-url "$RELAY_URL" \
   --dir "$RECORDS" --web web --wasm "$WASM" --dev-pay \

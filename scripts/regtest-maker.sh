@@ -18,13 +18,13 @@ cleanup() {
   # keeps rewriting its records and makes the next run lie.
   #
   # A non-zero pkill under `set -e` would take the exit status with it.
-  pkill -f "maker run --dir $SWAPS" 2>/dev/null || true
+  pkill -f "maker ln2btc-run --dir $SWAPS" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 # No daemon should outlive a test run: a stray one keeps rewriting the swap
 # records it knows about, which is exactly what a fresh run must not see.
-pkill -f 'maker run --dir' 2>/dev/null || true
+pkill -f 'maker ln2btc-run --dir' 2>/dev/null || true
 
 # Only the taker has this secret.
 TAKER=$(swapx keygen)
@@ -34,7 +34,7 @@ TAKER_PUBKEY=$(printf '%s\n' "$TAKER" | field pubkey)
 # --- a swap created while the daemon is down -------------------------------
 
 echo "== the daemon is not running =="
-NEW=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
+NEW=$(maker ln2btc-new --dir "$SWAPS" --amount "$AMOUNT" \
   --claim-pubkey "$TAKER_PUBKEY" 2>/dev/null)
 ID=$(printf '%s\n' "$NEW" | field id)
 BOLT11=$(printf '%s\n' "$NEW" | field bolt11)
@@ -61,7 +61,7 @@ echo "refund after:  height $LOCKTIME"
 
 echo
 echo "== starting the daemon so it can fund the swap =="
-maker run --dir "$SWAPS" --interval 1 > "$WORK/maker.out" 2> "$WORK/maker.err" &
+maker ln2btc-run --dir "$SWAPS" --interval 1 > "$WORK/maker.out" 2> "$WORK/maker.err" &
 
 echo
 echo "== taker pays the bond, and the daemon funds =="
@@ -72,7 +72,7 @@ echo "deposit:       $DEPOSIT:$DEPOSIT_VOUT ($(( SWAP_AMOUNT + CLAIM_FEE )) sat 
 mine 1 # confirm the deposit
 
 # Away again, so the payment below is left held rather than settled on the spot.
-pkill -f "maker run --dir $SWAPS" 2>/dev/null || true
+pkill -f "maker ln2btc-run --dir $SWAPS" 2>/dev/null || true
 sleep 0.5
 
 echo
@@ -99,7 +99,7 @@ echo "invoice:       $STATE, and nothing is settling it yet"
 
 echo
 echo "== the daemon comes back to a funded swap with the payment held =="
-maker run --dir "$SWAPS" --interval 1 > "$WORK/maker.out" 2> "$WORK/maker.err" &
+maker ln2btc-run --dir "$SWAPS" --interval 1 > "$WORK/maker.out" 2> "$WORK/maker.err" &
 
 STATE=$(await_swap_state "$ID" settled "$SWAPS") \
   || fail "the daemon did not settle the swap (state=$STATE)"
@@ -133,7 +133,7 @@ echo "swap done:     $SWAP_AMOUNT sat moved Lightning -> on-chain"
 
 echo
 echo "== a second swap: the taker pays the bond and then walks away =="
-NEW2=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
+NEW2=$(maker ln2btc-new --dir "$SWAPS" --amount "$AMOUNT" \
   --claim-pubkey "$TAKER_PUBKEY" 2>/dev/null)
 ID2=$(printf '%s\n' "$NEW2" | field id)
 LOCKTIME2=$(printf '%s\n' "$NEW2" | field locktime)
@@ -153,7 +153,7 @@ STATE=$(await_swap_state "$ID2" initiator_funded "$SWAPS") \
   || fail "the daemon did not record the deposit (state=$STATE)"
 echo "swap state:    $STATE"
 
-STATE=$(maker status --dir "$SWAPS" --id "$ID2" | field state)
+STATE=$(maker ln2btc-status --dir "$SWAPS" --id "$ID2" | field state)
 [ "$STATE" = "initiator_funded" ] \
   || fail "the daemon acted before the timeout (state=$STATE)"
 echo "before timeout: still $STATE, deposit still locked"
@@ -165,7 +165,7 @@ while [ "$(height)" -lt "$LOCKTIME2" ]; do mine "$(( LOCKTIME2 - $(height) ))"; 
 # wait for the broadcast first, then mine.
 REFUND_TXID="-"
 for _ in $(seq 1 20); do
-  REFUND_TXID=$(maker status --dir "$SWAPS" --id "$ID2" | field refund_txid) || true
+  REFUND_TXID=$(maker ln2btc-status --dir "$SWAPS" --id "$ID2" | field refund_txid) || true
   [ "$REFUND_TXID" != "-" ] && break
   sleep 1
 done
@@ -185,12 +185,12 @@ echo "swap state:    $STATE"
 # gone, the timeout had passed, and every tick rebuilt and rebroadcast a
 # transaction that could never be mined.
 
-pkill -f "maker run --dir $SWAPS" 2>/dev/null || true
+pkill -f "maker ln2btc-run --dir $SWAPS" 2>/dev/null || true
 sleep 0.5
 
 echo
 echo "== a third swap, refunded by someone else while the daemon is down =="
-NEW3=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
+NEW3=$(maker ln2btc-new --dir "$SWAPS" --amount "$AMOUNT" \
   --claim-pubkey "$TAKER_PUBKEY" 2>/dev/null)
 ID3=$(printf '%s\n' "$NEW3" | field id)
 HASH3=$(printf '%s\n' "$NEW3" | field payment_hash)
@@ -203,10 +203,10 @@ echo "paid for:      no, so nothing but a refund can spend the deposit"
 
 # Bring the daemon back just long enough to fund it, then take it away again:
 # the refund that follows is not this daemon's own.
-maker run --dir "$SWAPS" --interval 1 > "$WORK/maker3a.out" 2> "$WORK/maker3a.err" &
+maker ln2btc-run --dir "$SWAPS" --interval 1 > "$WORK/maker3a.out" 2> "$WORK/maker3a.err" &
 DEPOSIT3=$(bond_and_fund "$SWAPS" "$ID3" "$BOND3" | cut -d' ' -f1)
 mine 1
-pkill -f "maker run --dir $SWAPS" 2>/dev/null || true
+pkill -f "maker ln2btc-run --dir $SWAPS" 2>/dev/null || true
 sleep 0.5
 
 read -r VOUT3 SATS3 <<< "$(find_output "$DEPOSIT3" "$ADDRESS3")"
@@ -229,7 +229,7 @@ echo "refunded by:   someone other than the daemon ($TX3)"
 
 echo
 echo "== the daemon starts and finds the deposit already gone =="
-maker run --dir "$SWAPS" --interval 1 > "$WORK/maker3.out" 2> "$WORK/maker3.err" &
+maker ln2btc-run --dir "$SWAPS" --interval 1 > "$WORK/maker3.out" 2> "$WORK/maker3.err" &
 STATE=$(await_swap_state "$ID3" refunded "$SWAPS") \
   || fail "the daemon never noticed the deposit was gone (state=$STATE)"
 echo "swap state:    $STATE"
@@ -242,7 +242,7 @@ echo "swap state:    $STATE"
 
 echo
 echo "== a refund that would open inside the payment's lifetime is refused =="
-if maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
+if maker ln2btc-new --dir "$SWAPS" --amount "$AMOUNT" \
     --claim-pubkey "$TAKER_PUBKEY" --locktime-margin 30 \
     > /dev/null 2> "$WORK/bad-margin.err"; then
   fail "the maker offered a swap whose refund opens inside the payment's life"
@@ -253,12 +253,12 @@ echo "refused:       $(cut -c1-72 < "$WORK/bad-margin.err")"
 
 # The smallest margin the protocol allows is enough, so the floor is a floor.
 echo
-NEW4=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
+NEW4=$(maker ln2btc-new --dir "$SWAPS" --amount "$AMOUNT" \
   --claim-pubkey "$TAKER_PUBKEY" --locktime-margin 52 2>/dev/null)
 ID4=$(printf '%s\n' "$NEW4" | field id)
 [ -n "$ID4" ] || fail "a margin of exactly 52 was refused"
 echo "accepted:      a margin of 52 blocks (40 CLTV + 12)"
-pkill -f "maker run --dir $SWAPS" 2>/dev/null || true
+pkill -f "maker ln2btc-run --dir $SWAPS" 2>/dev/null || true
 
 # It has to adopt what happened rather than act on it: a refund of its own here
 # would be a transaction it could never get mined.

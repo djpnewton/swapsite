@@ -2,8 +2,8 @@
 #
 # One complete swap, end to end, on regtest.
 #
-# Direction: the taker pays Lightning and receives on-chain (reverse
-# submarine). The maker issues a hold invoice and funds an HTLC; the taker pays
+# Direction: the taker pays Lightning and receives on-chain (ln2btc). The
+# maker issues a hold invoice and funds an HTLC; the taker pays
 # the invoice and claims the HTLC with the preimage Lightning reveals.
 #
 # Neither side can take the other's value: the maker cannot claim the HTLC

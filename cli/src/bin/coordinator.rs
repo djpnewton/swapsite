@@ -17,7 +17,7 @@ use swapsite_adapters::{
     http::{content_type_for, serve, Request, Response},
     LnCli,
 };
-use swapsite_core::{lightning::LightningNode, maker::PublicSwap};
+use swapsite_core::{lightning::LightningNode, maker_ln2btc::Ln2btcPublicSwap};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -271,7 +271,7 @@ impl Service {
             Err(e) => return Response::error(500, e.to_string()),
         };
 
-        let swaps: Vec<PublicSwap> = recorded
+        let swaps: Vec<Ln2btcPublicSwap> = recorded
             .into_iter()
             .filter(|swap| wanted.is_none_or(|wanted| swap.claim_pubkey == wanted))
             .map(|swap| self.fresh(&swap.id).unwrap_or(swap))
@@ -281,13 +281,13 @@ impl Service {
     }
 
     /// The maker's view of a swap, if it can be had. Anything learned is saved.
-    fn fresh(&self, id: &str) -> Option<PublicSwap> {
+    fn fresh(&self, id: &str) -> Option<Ln2btcPublicSwap> {
         let response = fetch("GET", &format!("{}/swaps/{id}", self.maker_url), None).ok()?;
         if response.status != 200 {
             return None;
         }
 
-        let swap: PublicSwap = serde_json::from_str(&response.body).ok()?;
+        let swap: Ln2btcPublicSwap = serde_json::from_str(&response.body).ok()?;
         let _ = self.save(&swap);
         Some(swap)
     }
@@ -371,7 +371,7 @@ impl Service {
         }
     }
 
-    fn ask_maker(&self, body: &str) -> std::result::Result<PublicSwap, String> {
+    fn ask_maker(&self, body: &str) -> std::result::Result<Ln2btcPublicSwap, String> {
         let response = fetch("POST", &format!("{}/swaps", self.maker_url), Some(body))
             .map_err(|e| format!("could not reach the maker: {e}"))?;
 
@@ -412,7 +412,7 @@ impl Service {
         }
     }
 
-    fn save(&self, swap: &PublicSwap) -> Result<()> {
+    fn save(&self, swap: &Ln2btcPublicSwap) -> Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         let path = self.dir.join(format!("{}.json", swap.id));
         let temp = path.with_extension("json.tmp");
@@ -421,12 +421,12 @@ impl Service {
         Ok(())
     }
 
-    fn load(&self, id: &str) -> Result<PublicSwap> {
+    fn load(&self, id: &str) -> Result<Ln2btcPublicSwap> {
         let text = std::fs::read_to_string(self.dir.join(format!("{id}.json")))?;
         Ok(serde_json::from_str(&text)?)
     }
 
-    fn load_all(&self) -> Result<Vec<PublicSwap>> {
+    fn load_all(&self) -> Result<Vec<Ln2btcPublicSwap>> {
         if !self.dir.exists() {
             return Ok(Vec::new());
         }
