@@ -106,9 +106,11 @@ SWAP_INVOICE=$(printf '%s' "$SWAP" | jget .invoice_sat)
 echo "swap id:       $ID"
 echo "deposit:       $DEPOSIT"
 
-# The coordinator must never be handed the maker's secrets.
+# The coordinator must never be handed the maker's secrets, and a swap that has
+# not settled has no preimage to hand over - the field is absent, not null, so
+# nothing about a live swap says "the secret is out".
 if printf '%s' "$SWAP" | grep -q 'preimage\|secret'; then
-  fail "the swap handed out a secret"
+  fail "an unsettled swap handed out a secret"
 fi
 echo "secrets:       none in the swap the page received"
 
@@ -132,6 +134,13 @@ echo "preimage:      ${PREIMAGE:0:16}... (dev pay stands in for the taker's wall
 STATE=$(curl -s "$COORD_URL/swaps/$ID" | jget .state)
 [ "$STATE" = "settled" ] || fail "the maker did not settle (state=$STATE)"
 echo "swap state:    $STATE"
+
+# Settling is the reveal, so the maker publishes the preimage from that moment.
+# That is what lets a taker who paid from another wallet claim without carrying
+# the secret across by hand.
+PUBLISHED=$(curl -s "$COORD_URL/swaps/$ID" | jget .preimage)
+[ "$PUBLISHED" = "$PREIMAGE" ] || fail "a settled swap withheld its preimage (got '$PUBLISHED')"
+echo "revealed:      ${PUBLISHED:0:16}... (published by the maker once it settled)"
 
 echo
 echo "== the taker claims on chain =="
@@ -171,4 +180,4 @@ COUNT=$(printf '%s' "$OTHER" | python3 -c 'import json,sys; print(len(json.load(
 echo "isolation:     another key sees $COUNT swaps"
 
 echo
-echo "ok: quoted, brokered, verified, paid, claimed, and recovered"
+echo "ok: quoted, brokered, verified, paid, settled, claimed, and recovered"

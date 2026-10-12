@@ -102,8 +102,11 @@ pub enum RecordError {
 
 /// The shareable description of a swap.
 ///
-/// Everything a taker or a coordinator needs, and nothing else. The preimage
-/// and the refund secret are the maker's alone and must never appear here.
+/// Everything a taker or a coordinator needs, and nothing else. The refund
+/// secret is the maker's alone and must never appear here. The preimage is a
+/// secret only until the maker settles: settling is what reveals it to the
+/// Lightning network, so from that moment it is public and a taker who paid
+/// from another wallet can claim with it instead of carrying it across by hand.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PublicSwap {
     pub id: String,
@@ -125,6 +128,12 @@ pub struct PublicSwap {
     pub deposit_txid: Option<String>,
     pub deposit_vout: Option<u32>,
     pub refund_txid: Option<String>,
+    /// The preimage, present only once settling has revealed it.
+    ///
+    /// Absent rather than null before then: a taker must not be able to read
+    /// "the secret is out" off a swap that has not settled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preimage: Option<String>,
 }
 
 impl SwapRecord {
@@ -147,6 +156,9 @@ impl SwapRecord {
             deposit_txid: self.funding.as_ref().map(|funding| funding.txid.clone()),
             deposit_vout: self.funding.as_ref().map(|funding| funding.vout),
             refund_txid: self.refund_txid()?.map(|txid| txid.to_string()),
+            // Settling is the reveal, and `Settled` is only ever reached by
+            // observing a settled invoice, so this cannot run ahead of it.
+            preimage: (self.state == SwapState::Settled).then(|| self.preimage.to_hex()),
         })
     }
 
@@ -379,7 +391,8 @@ mod tests {
         );
         assert!(public.refund_txid.is_some());
 
-        // The whole point of this type: it cannot leak the maker's secrets.
+        // The whole point of this type: before the swap settles it cannot leak
+        // the maker's secrets, and it does not even admit to holding one.
         let json = serde_json::to_string(&public).unwrap();
         assert!(!json.contains(&record.preimage.to_hex()), "preimage leaked");
         assert!(
@@ -388,6 +401,40 @@ mod tests {
         );
         assert!(!json.contains("preimage"));
         assert!(!json.contains("secret"));
+    }
+
+    #[test]
+    fn the_public_view_reveals_the_preimage_once_settled() {
+        let mut record = record(500);
+        record.state = SwapState::CounterpartyLocked;
+        assert!(record.public().unwrap().preimage.is_none());
+
+        record.state = SwapState::Settled;
+        let hex = record.preimage.to_hex();
+        assert_eq!(
+            record.public().unwrap().preimage.as_deref(),
+            Some(hex.as_str())
+        );
+    }
+
+    #[test]
+    fn a_refunded_swap_never_reveals_a_preimage() {
+        // The refund path means the invoice never settled, so there is nothing
+        // to reveal - the maker still holds a preimage it must not publish.
+        let mut record = record(500);
+        record.state = SwapState::Refunded;
+        assert!(record.public().unwrap().preimage.is_none());
+    }
+
+    #[test]
+    fn a_public_swap_survives_a_round_trip_without_the_preimage() {
+        // The coordinator stores these and reads them back, including ones
+        // written before this field existed.
+        let record = record(500);
+        let json = serde_json::to_string(&record.public().unwrap()).unwrap();
+        let parsed: PublicSwap = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, record.public().unwrap());
+        assert!(parsed.preimage.is_none());
     }
 
     #[test]

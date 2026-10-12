@@ -49,8 +49,8 @@ chain. Never use equal timeouts. Per-chain margins: BTC ~10 min blocks
 
 | Role            | Who runs it          | Holds                                            |
 | --------------- | -------------------- | ------------------------------------------------ |
-| Taker           | end user             | their keys, per-swap preimage, swap state        |
-| Maker           | liquidity provider   | BTC + L-BTC inventory, LN channels, HODL invoices |
+| Taker           | end user             | the per-swap claim key, the preimage once settled, swap state |
+| Maker           | liquidity provider   | BTC + L-BTC inventory, LN channels, HODL invoices, the per-swap refund key and preimage |
 | Coordinator     | the website operator | no keys, no funds - quotes, state, chain observation |
 
 ## 4. What the website does and must never do
@@ -179,6 +179,12 @@ Registry of decisions:
 - **Nothing dev-only is on by default.** The endpoint that pays a taker's invoice
   on its behalf is behind `--dev-pay`, because using it means the coordinator
   learns a preimage it would never see in production.
+- **The maker publishes the preimage once the swap settles.** Settling *is* the
+  reveal - it is what tells the Lightning network the payment is claimable - so
+  from that moment the preimage is public, and withholding it only costs a taker
+  who paid from another wallet a manual copy-paste. It is published on settled
+  swaps and on nothing else, and the field is absent rather than null before
+  then, so a swap's public view cannot be read as "the secret is out".
 - **Recovery is a verdict, not a service.** Nobody can claim for the taker, so
   what the taker gets is a judgement - drawn from its own preimage, the chain,
   and the HTLC's own locktime - of whether a move is left. The page acts on it

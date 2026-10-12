@@ -174,6 +174,22 @@ function outstanding() {
 }
 
 /**
+ * Take the preimage the maker has published.
+ *
+ * The maker settles to reveal it, so from that moment it is public, and a taker
+ * who paid from another wallet can claim with it rather than carrying the
+ * secret across by hand. It is only offered on a swap that has already settled,
+ * which is exactly when this page is stuck without it - and claiming checks the
+ * preimage against the HTLC anyway, so a wrong one makes this page sign
+ * nothing.
+ */
+function adoptRevealedPreimage(id) {
+  const entry = session.swaps[id];
+  if (entry.preimage || !entry.swap?.preimage) return;
+  update(id, { preimage: entry.swap.preimage, error: null });
+}
+
+/**
  * Do whatever a returned tab can do by itself.
  *
  * Claiming is unilateral and only ever moves value towards the taker, so it is
@@ -182,6 +198,10 @@ function outstanding() {
  * reload has no address to reuse, so it says so rather than guessing.
  */
 async function recoverSwaps() {
+  // Before judging anything: a published preimage turns `find_preimage` into a
+  // claim, so this is the difference between waiting and acting.
+  for (const id of Object.keys(session.swaps)) adoptRevealedPreimage(id);
+
   for (const { id, recovery } of outstanding()) {
     const entry = session.swaps[id];
     if (entry.busy || entry.claimed || entry.error) continue;
@@ -259,7 +279,7 @@ async function claim(id, options = {}) {
     }
 
     // Refuses unless the preimage really unlocks this HTLC.
-    const join = taker.checkJoin({
+    taker.checkJoin({
       payment_hash: swap.payment_hash,
       locktime: swap.locktime,
       claim_pubkey: swap.claim_pubkey,
@@ -282,7 +302,9 @@ async function claim(id, options = {}) {
     const txid = await chain.broadcast(signed.tx_hex);
     update(id, {
       busy: null,
-      claimed: { txid, address: join.address, auto: Boolean(options.auto) },
+      // The destination the taker named, not the HTLC: this is the record of
+      // where the coins went, and `checkJoin` only proves the preimage fits.
+      claimed: { txid, address, auto: Boolean(options.auto) },
       error: null,
     });
   } catch (error) {
@@ -403,7 +425,7 @@ function notice(recovery) {
     case "racing":
       return `<p class="error urgent">The refund path is open, so the maker can take this deposit back at any moment. Claim now - a claim still wins, but only if it gets there first.</p>`;
     case "find_preimage":
-      return `<p class="error${urgent ? " urgent" : ""}">Your payment settled, so the preimage is public, but this page does not have it. Paste it from the wallet that paid, before height ${deadline}.</p>`;
+      return `<p class="error${urgent ? " urgent" : ""}">Your payment settled, so the preimage is public - the maker publishes it when it settles and this clears by itself. If the maker cannot be reached, paste it from the wallet that paid, before height ${deadline}.</p>`;
     case "gone":
       return `<p class="error">This deposit has been spent, so there is no longer anything to claim. If you claimed it yourself, your coins are at the address you named. If you did not, the maker refunded it and the payment you made went with it.</p>`;
     default:

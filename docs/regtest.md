@@ -293,20 +293,31 @@ This is the flow the invoice display exists for, and it is worth walking once
 because it exercises three things at the same time:
 
 1. On the taker page, **Get a quote**. The card now shows the bolt11 to pay.
-2. Paste that into the panel and **Pay**. The payment is held, not settled: the
-   maker will not settle until the deposit has a confirmation.
-3. **Mine a block** in the panel. The maker settles on its next tick, the panel
-   shows the preimage, and the swap reads `settled`.
-4. The taker page has been saying `find_preimage` since step 3 - it has no
-   preimage, because it never paid. Paste the one the panel showed, and it
-   claims.
+2. Paste that into the panel and **Pay**. That request stays open until the maker
+   settles, and it should: `lncli payinvoice` waits for the payment to reach a
+   terminal state, and a held payment has not reached one - it is a promise, not
+   a settlement. The panel serves each connection on its own thread, so it keeps
+   answering, which is what makes step 3 possible at all.
+3. **Mine a block** in the panel. The maker settles on its next tick, the payment
+   completes, and the swap reads `settled`.
+4. Nothing else. The page has been saying `find_preimage` - it has no preimage,
+   because it never paid - and by the next poll the maker has settled and
+   published one, so the verdict turns into `claim`. Name an address and it
+   claims; with an address already on the card it claims by itself.
 
-Step 4 is the honest consequence of paying from outside the page: the page cannot
-know a preimage it was never told. It is also the one clumsy step, and the fix is
-a protocol question rather than a UI one - a maker could hand over the preimage of
-a swap it has already settled, since by then the preimage is public anyway. That
-would remove the copy-paste, and it means widening the maker's public API, so it
-is not done yet.
+Step 4 is worth being precise about, because it is the one place the two sides
+have to agree. Settling *is* the reveal: a hold invoice is settled by handing
+over the preimage, which is what tells the Lightning network the payment is
+claimable, so the preimage is public from that moment. A maker that withheld it
+would not be protecting anything - it would only be costing a taker who paid from
+another wallet a manual copy-paste. So `PublicSwap` carries the preimage on a
+**settled** swap and on nothing else, and the field is absent rather than null
+before then, so a swap's public view cannot be read as "the secret is out".
+
+The copy-paste route stays as the fallback. A maker that is unreachable, or one
+running an older build, leaves the page at `find_preimage`, and then the wallet
+that paid is the only source of the preimage; the page says so and keeps the
+inline field.
 
 ### How the services reach Lightning
 

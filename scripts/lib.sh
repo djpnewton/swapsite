@@ -18,7 +18,9 @@ BIN="${CARGO_TARGET_DIR:-target}/debug"
 
 # Build once and call the binaries directly. A background daemon started with
 # `cargo run` would hold the build lock and deadlock every other invocation.
-cargo build --quiet --bin swapx --bin maker --bin relay
+# The coordinator is here because the scripts that use it start it by path, and
+# would otherwise only work on a tree where something else had already built it.
+cargo build --quiet --bin swapx --bin maker --bin relay --bin coordinator
 
 btc() { "${BTC[@]}" "$@"; }
 swapx() { "$BIN/swapx" "$@"; }
