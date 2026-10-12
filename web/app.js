@@ -217,9 +217,15 @@ async function recoverSwaps() {
 }
 
 async function checkDeposit(id) {
+  const { swap } = session.swaps[id];
+  if (!swap?.deposit_txid) {
+    // Nothing is funded until the bond is in, so there is nothing to check yet.
+    update(id, { busy: null, error: null });
+    return;
+  }
+
   update(id, { busy: "checking", error: null });
   try {
-    const { swap } = session.swaps[id];
     const tx = await chain.transaction(swap.deposit_txid);
     if (!tx) {
       throw new Error("the relay does not know the deposit");
@@ -242,6 +248,9 @@ async function checkDeposit(id) {
 
 async function pay(id) {
   const { swap } = session.swaps[id];
+  // Before the deposit exists the only thing to pay is the bond, and paying it
+  // reveals nothing: a bond's preimage unlocks no HTLC.
+  const bonded = Boolean(swap.deposit_txid);
   update(id, { busy: "paying", error: null });
 
   try {
@@ -249,11 +258,17 @@ async function pay(id) {
       // Stand-in for the taker's wallet. In production the page pays through
       // WebLN and the preimage never touches the coordinator.
       const paid = await api(`/dev/pay/${id}`, "");
-      update(id, { busy: null, preimage: paid.preimage, error: null });
+      update(id, {
+        busy: null,
+        error: null,
+        ...(paid.preimage ? { preimage: paid.preimage } : {}),
+      });
     } else if (window.webln) {
       await window.webln.enable();
-      const { preimage } = await window.webln.sendPayment(swap.bolt11);
-      update(id, { busy: null, preimage, error: null });
+      const { preimage } = await window.webln.sendPayment(
+        bonded ? swap.bolt11 : swap.bond_bolt11,
+      );
+      update(id, { busy: null, error: null, ...(bonded ? { preimage } : {}) });
     } else {
       throw new Error(
         "no WebLN wallet in this browser and dev pay is off. Pay the invoice from your own wallet, then paste the preimage below.",
@@ -325,11 +340,22 @@ function card(id, entry) {
   if (!swap) return "";
 
   const recovery = verdict(id);
+  // Nothing is funded until the bond is in, so this comes before there is a
+  // deposit to check or a swap to pay for.
+  const bonded = Boolean(swap.deposit_txid);
+
   const rows = [
     `<dt>you receive</dt><dd>${sats(swap.amount_sat)}</dd>`,
-    `<dt>you pay</dt><dd>${sats(swap.invoice_sat)} over Lightning</dd>`,
-    `<dt>deposit</dt><dd>${short(swap.deposit_txid)}:${swap.deposit_vout ?? "?"} ${
-      verified ? `(${sats(verified.sats)}, ${verified.confirmations} conf)` : ""
+    `<dt>you pay</dt><dd>${sats(swap.invoice_sat)} over Lightning${
+      // A swap started before the bond existed simply has none to show.
+      swap.bond_sat ? `, plus a ${sats(swap.bond_sat)} bond` : ""
+    }</dd>`,
+    `<dt>deposit</dt><dd>${
+      bonded
+        ? `${short(swap.deposit_txid)}:${swap.deposit_vout ?? "?"} ${
+            verified ? `(${sats(verified.sats)}, ${verified.confirmations} conf)` : ""
+          }`
+        : "not funded yet"
     }</dd>`,
     `<dt>htlc</dt><dd>${swap.htlc_address}</dd>`,
     `<dt>refund after</dt><dd>height ${swap.locktime}</dd>`,
@@ -346,47 +372,65 @@ function card(id, entry) {
   // invite a transaction that is guaranteed to be rejected.
   const gone = recovery?.action.kind === "gone";
 
+  // The bond comes first and is not returned: it is what makes abandoning a
+  // swap cost the taker rather than the maker.
+  const bond = bonded
+    ? ""
+    : `<p class="quote">Pay the bond first, before height ${swap.bond_by}. The
+       maker funds nothing until it is in, and it is not returned: it covers its
+       on-chain fees either way.</p>
+       <pre class="bolt11">${swap.bond_bolt11}</pre>`;
+
   // The invoice, shown whether or not this page can pay it. Paying from another
   // wallet is the real flow; the dev shortcut is only a shortcut.
   const invoice =
-    !preimage && swap.bolt11
+    bonded && !preimage && swap.bolt11
       ? `<p class="quote">Pay this invoice, from any wallet on this network:</p>
          <pre class="bolt11">${swap.bolt11}</pre>`
       : "";
 
   const actions = [];
   if (!gone) {
-    if (!verified) {
+    if (!bonded) {
+      // No deposit yet, so no check and no swap to pay for - only the bond.
       actions.push(
-        `<button data-act="check" data-id="${id}" ${busy ? "disabled" : ""}>Check the deposit</button>`,
+        `<button data-act="pay" data-id="${id}" class="primary" ${busy ? "disabled" : ""}>Pay the ${sats(
+          swap.bond_sat,
+        )} bond</button>`,
       );
-    }
-    if (!preimage) {
-      actions.push(
-        `<button data-act="pay" data-id="${id}" class="primary" ${busy ? "disabled" : ""}>Pay ${sats(
-          swap.invoice_sat,
-        )}</button>`,
-      );
-      // An inline field rather than a modal prompt: a prompt is unstylable, and
-      // some hosts do not implement it at all, which makes the only route to a
-      // swap paid from another wallet unusable.
-      actions.push(
-        `<input data-preimage="${id}" placeholder="preimage, if you paid elsewhere" value="${
-          entry.typedPreimage ?? ""
-        }" />`,
-      );
-      actions.push(`<button data-act="paste" data-id="${id}">I paid elsewhere</button>`);
-    } else if (!claimed) {
-      actions.push(
-        `<input data-addr="${id}" placeholder="address to receive" value="${
-          entry.address ?? ""
-        }" />`,
-      );
-      actions.push(
-        `<button data-act="claim" data-id="${id}" class="primary" ${busy ? "disabled" : ""}>Claim ${
-          verified ? sats(verified.sats - swap.claim_fee_sat) : "on chain"
-        }</button>`,
-      );
+    } else {
+      if (!verified) {
+        actions.push(
+          `<button data-act="check" data-id="${id}" ${busy ? "disabled" : ""}>Check the deposit</button>`,
+        );
+      }
+      if (!preimage) {
+        actions.push(
+          `<button data-act="pay" data-id="${id}" class="primary" ${busy ? "disabled" : ""}>Pay ${sats(
+            swap.invoice_sat,
+          )}</button>`,
+        );
+        // An inline field rather than a modal prompt: a prompt is unstylable, and
+        // some hosts do not implement it at all, which makes the only route to a
+        // swap paid from another wallet unusable.
+        actions.push(
+          `<input data-preimage="${id}" placeholder="preimage, if you paid elsewhere" value="${
+            entry.typedPreimage ?? ""
+          }" />`,
+        );
+        actions.push(`<button data-act="paste" data-id="${id}">I paid elsewhere</button>`);
+      } else if (!claimed) {
+        actions.push(
+          `<input data-addr="${id}" placeholder="address to receive" value="${
+            entry.address ?? ""
+          }" />`,
+        );
+        actions.push(
+          `<button data-act="claim" data-id="${id}" class="primary" ${busy ? "disabled" : ""}>Claim ${
+            verified ? sats(verified.sats - swap.claim_fee_sat) : "on chain"
+          }</button>`,
+        );
+      }
     }
   }
 
@@ -399,6 +443,7 @@ function card(id, entry) {
       <dl>${rows.join("")}</dl>
       <div class="actions">${actions.join("")}</div>
       ${busy ? `<p class="quote">${busy}…</p>` : ""}
+      ${bond}
       ${invoice}
       ${notice(recovery)}
       ${
@@ -496,7 +541,10 @@ async function recover() {
   try {
     const { swaps } = await api(`/swaps?claim_pubkey=${session.key.pubkey}`);
     for (const swap of swaps) {
-      if (!session.swaps[swap.id]) update(swap.id, { swap });
+      // Not only for swaps this page has not seen: the coordinator refreshes
+      // each one from the maker, and a stored copy can be older than the terms
+      // the swap actually has.
+      update(swap.id, { swap });
     }
   } catch (error) {
     $("foot").textContent = `Could not reach the coordinator: ${error.message}`;

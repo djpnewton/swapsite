@@ -37,9 +37,11 @@ NEW=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
   --claim-pubkey "$TAKER_PUBKEY" --locktime-margin 30 2>/dev/null)
 ID=$(printf '%s\n' "$NEW" | field id)
 BOLT11=$(printf '%s\n' "$NEW" | field bolt11)
+BOND=$(printf '%s\n' "$NEW" | field bond_bolt11)
+BOND_SAT=$(printf '%s\n' "$NEW" | field bond_sat)
+BOND_BY=$(printf '%s\n' "$NEW" | field bond_by)
 ADDRESS=$(printf '%s\n' "$NEW" | field htlc_address)
 HASH=$(printf '%s\n' "$NEW" | field payment_hash)
-DEPOSIT=$(printf '%s\n' "$NEW" | field deposit_txid)
 LOCKTIME=$(printf '%s\n' "$NEW" | field locktime)
 REFUND_PUBKEY=$(printf '%s\n' "$NEW" | field refund_pubkey)
 SWAP_AMOUNT=$(printf '%s\n' "$NEW" | field amount)
@@ -47,10 +49,30 @@ CLAIM_FEE=$(printf '%s\n' "$NEW" | field claim_fee)
 
 echo "swap id:       $ID"
 echo "amount:        $SWAP_AMOUNT sat over Lightning"
-echo "deposit:       $DEPOSIT ($(( SWAP_AMOUNT + CLAIM_FEE )) sat on chain)"
+echo "deposit:       not funded yet: the bond comes first"
+echo "bond:          $BOND_SAT sat, due by height $BOND_BY"
 echo "refund after:  height $LOCKTIME"
 
+# --- funding, then a cold start -------------------------------------------
+#
+# The daemon has never seen this swap, so it has to fund it from the record
+# alone - and it will not fund it until the bond is in.
+
+echo
+echo "== starting the daemon so it can fund the swap =="
+maker run --dir "$SWAPS" --interval 1 > "$WORK/maker.out" 2> "$WORK/maker.err" &
+
+echo
+echo "== taker pays the bond, and the daemon funds =="
+require_outbound "$(( SWAP_AMOUNT + BOND_SAT ))" taker
+read -r DEPOSIT DEPOSIT_VOUT <<< "$(bond_and_fund "$SWAPS" "$ID" "$BOND")"
+echo "deposit:       $DEPOSIT:$DEPOSIT_VOUT ($(( SWAP_AMOUNT + CLAIM_FEE )) sat on chain)"
+
 mine 1 # confirm the deposit
+
+# Away again, so the payment below is left held rather than settled on the spot.
+pkill -f "maker run --dir $SWAPS" 2>/dev/null || true
+sleep 0.5
 
 echo
 echo "== taker checks the on-chain leg from public values only =="
@@ -75,7 +97,7 @@ echo "invoice:       $STATE, and nothing is settling it yet"
 # --- cold start ------------------------------------------------------------
 
 echo
-echo "== starting the daemon on a swap it never saw created =="
+echo "== the daemon comes back to a funded swap with the payment held =="
 maker run --dir "$SWAPS" --interval 1 > "$WORK/maker.out" 2> "$WORK/maker.err" &
 
 STATE=$(await_swap_state "$ID" settled "$SWAPS") \
@@ -109,15 +131,21 @@ echo "swap done:     $SWAP_AMOUNT sat moved Lightning -> on-chain"
 # --- the taker never pays --------------------------------------------------
 
 echo
-echo "== a second swap, whose taker never pays =="
+echo "== a second swap: the taker pays the bond and then walks away =="
 NEW2=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
   --claim-pubkey "$TAKER_PUBKEY" --locktime-margin 8 2>/dev/null)
 ID2=$(printf '%s\n' "$NEW2" | field id)
 LOCKTIME2=$(printf '%s\n' "$NEW2" | field locktime)
-DEPOSIT2=$(printf '%s\n' "$NEW2" | field deposit_txid)
+BOND2=$(printf '%s\n' "$NEW2" | field bond_bolt11)
+BOND2_SAT=$(printf '%s\n' "$NEW2" | field bond_sat)
 echo "swap id:       $ID2"
-echo "deposit:       $DEPOSIT2"
 echo "refund after:  height $LOCKTIME2"
+
+# The bond is what the maker keeps for its trouble, and it is paid before any
+# of its own capital moves.
+read -r DEPOSIT2 _ <<< "$(bond_and_fund "$SWAPS" "$ID2" "$BOND2")"
+echo "bond:          $BOND2_SAT sat collected, and the taker stopped there"
+echo "deposit:       $DEPOSIT2"
 
 mine 1
 STATE=$(await_swap_state "$ID2" initiator_funded "$SWAPS") \
@@ -166,13 +194,20 @@ NEW3=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
 ID3=$(printf '%s\n' "$NEW3" | field id)
 HASH3=$(printf '%s\n' "$NEW3" | field payment_hash)
 ADDRESS3=$(printf '%s\n' "$NEW3" | field htlc_address)
-DEPOSIT3=$(printf '%s\n' "$NEW3" | field deposit_txid)
 LOCKTIME3=$(printf '%s\n' "$NEW3" | field locktime)
+BOND3=$(printf '%s\n' "$NEW3" | field bond_bolt11)
 echo "swap id:       $ID3"
 echo "refund after:  height $LOCKTIME3"
 echo "paid for:      no, so nothing but a refund can spend the deposit"
 
+# Bring the daemon back just long enough to fund it, then take it away again:
+# the refund that follows is not this daemon's own.
+maker run --dir "$SWAPS" --interval 1 > "$WORK/maker3a.out" 2> "$WORK/maker3a.err" &
+DEPOSIT3=$(bond_and_fund "$SWAPS" "$ID3" "$BOND3" | cut -d' ' -f1)
 mine 1
+pkill -f "maker run --dir $SWAPS" 2>/dev/null || true
+sleep 0.5
+
 read -r VOUT3 SATS3 <<< "$(find_output "$DEPOSIT3" "$ADDRESS3")"
 [ -n "$VOUT3" ] || fail "the deposit does not pay the HTLC"
 

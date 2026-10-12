@@ -206,6 +206,31 @@ impl LnCli {
             "payment_request",
         )
     }
+
+    /// Create an invoice locked to a preimage the caller chose.
+    ///
+    /// The bond needs this: its hash is derived from the swap's secret, so the
+    /// maker never has to read the node's own bookkeeping to answer "has the
+    /// taker paid it yet".
+    pub fn add_invoice_with(
+        &self,
+        preimage: &Preimage,
+        sats: u64,
+        memo: &str,
+    ) -> Result<String, LightningError> {
+        only_field(
+            &self.run(&[
+                "addinvoice",
+                "--amt",
+                &sats.to_string(),
+                "--memo",
+                memo,
+                "--preimage",
+                &preimage.to_hex(),
+            ])?,
+            "payment_request",
+        )
+    }
 }
 
 /// How much a node can send and receive over its channels.

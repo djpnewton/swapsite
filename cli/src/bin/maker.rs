@@ -25,7 +25,7 @@ use swapsite_core::{
     chain::Chain,
     hash::Preimage,
     htlc::Htlc,
-    lightning::LightningNode,
+    lightning::{InvoiceState, LightningNode},
     maker::{plan, reconcile, Action, Funding, Observed, PublicSwap, SwapRecord},
     state::{Event, SwapState},
 };
@@ -64,6 +64,13 @@ enum Cmd {
         /// Fee for the refund transaction, in satoshis.
         #[arg(long, default_value_t = 2_000)]
         refund_fee: u64,
+        /// Bond the taker pays up front, in satoshis. Covers the deposit and
+        /// refund transactions, so an abandoned swap is not free.
+        #[arg(long, default_value_t = 4_000)]
+        bond_fee: u64,
+        /// Blocks the taker has to pay the bond in.
+        #[arg(long, default_value_t = 30)]
+        bond_window: u32,
     },
 
     /// Run the daemon: watch every swap and act on it.
@@ -178,6 +185,8 @@ fn main() -> Result<()> {
             claim_fee,
             locktime_margin,
             refund_fee,
+            bond_fee,
+            bond_window,
         } => new_swap(
             &config,
             &NewSwapRequest {
@@ -187,6 +196,8 @@ fn main() -> Result<()> {
                 claim_fee,
                 locktime_margin,
                 refund_fee,
+                bond_fee,
+                bond_window,
             },
         ),
         Cmd::Run { config, once } => run(&config, once),
@@ -215,6 +226,18 @@ struct NewSwapRequest {
     /// Fee for the refund transaction, in satoshis.
     #[serde(default = "default_refund_fee")]
     refund_fee: u64,
+    /// What the taker pays up front to start the swap, in satoshis.
+    ///
+    /// A floor rather than a price: it covers the entry and exit fees, so an
+    /// abandoned swap costs the taker rather than the maker.
+    #[serde(default = "default_bond_fee")]
+    bond_fee: u64,
+    /// Blocks the taker has to pay the bond in.
+    ///
+    /// The on-chain locktime is measured from the end of this window, so a slow
+    /// bond cannot eat into the margin between the deposit and the refund.
+    #[serde(default = "default_bond_window")]
+    bond_window: u32,
 }
 
 fn default_claim_fee() -> u64 {
@@ -229,7 +252,19 @@ fn default_refund_fee() -> u64 {
     2_000
 }
 
-/// Build, persist and broadcast the maker's side of a new swap.
+fn default_bond_fee() -> u64 {
+    4_000
+}
+
+fn default_bond_window() -> u32 {
+    30
+}
+
+/// Offer a swap: the invoices and the terms. Nothing is funded yet.
+///
+/// The bond is collected first, deliberately. Funding before it is what makes
+/// walking away free: the taker would risk nothing while parking the maker's
+/// capital for the whole locktime, and pay nothing for the privilege.
 fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<SwapRecord> {
     let chain = config.chain()?;
     let lightning = config.lightning()?;
@@ -237,7 +272,10 @@ fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<SwapReco
 
     let amount_sat = request.amount;
     let claim_pubkey = PublicKey::from_str(&request.claim_pubkey)?;
-    let locktime = chain.height()? + request.locktime_margin;
+    // The bond window is part of the locktime: the refund has to stay
+    // `locktime_margin` away from the latest height the maker will fund at.
+    let bond_by = chain.height()? + request.bond_window;
+    let locktime = bond_by + request.locktime_margin;
 
     // A fresh refund key per swap, so one leaked record cannot expose the rest.
     let secp = Secp256k1::new();
@@ -256,18 +294,12 @@ fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<SwapReco
 
     // Deposit enough for the taker to claim and still net what it was quoted.
     let deposit_sat = amount_sat + request.claim_fee;
-    let funding = chain.fund(&address, Amount::from_sat(deposit_sat))?;
-
-    let script_pubkey = address.script_pubkey();
-    let (vout, sats) = funding
-        .output
-        .iter()
-        .enumerate()
-        .find(|(_, output)| output.script_pubkey == script_pubkey)
-        .map(|(vout, output)| (vout as u32, output.value.to_sat()))
-        .ok_or("the funded transaction does not pay the HTLC")?;
-
     let invoice = lightning.add_hold_invoice(&preimage, amount_sat + request.fee, "swap")?;
+    // A plain invoice, not a hold one: paying it is final, which is exactly what
+    // makes abandoning cost the taker. Its hash is derived, so settling it
+    // reveals nothing about the on-chain leg.
+    let bond_bolt11 =
+        lightning.add_invoice_with(&preimage.bond_preimage(), request.bond_fee, "swap bond")?;
 
     let record = SwapRecord {
         id: preimage.payment_hash().to_hex(),
@@ -278,25 +310,51 @@ fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<SwapReco
         deposit_sat,
         claim_fee_sat: request.claim_fee,
         refund_fee_sat: request.refund_fee,
+        bond_sat: request.bond_fee,
+        bond_by,
         claim_pubkey: claim_pubkey.to_string(),
         refund_secret: hex::encode(refund_key.secret_bytes()),
         refund_pubkey: refund_pubkey.to_string(),
         locktime,
         htlc_address: address.to_string(),
         bolt11: invoice.bolt11,
-        funding_tx: Some(serialize_hex(&funding)),
-        funding: Some(Funding {
-            txid: funding.compute_txid().to_string(),
-            vout,
-            sats,
-        }),
+        bond_bolt11,
+        funding_tx: None,
+        funding: None,
         refund_tx: None,
         state: SwapState::Created,
     };
 
+    // Saved before it is offered: a bond the daemon does not remember collecting
+    // is a bond it never collects.
+    store.save(&record)?;
+    Ok(record)
+}
+
+/// Fund and broadcast the on-chain leg. Only ever called once the bond is in.
+fn fund_swap(record: &mut SwapRecord, config: &NodeConfig, chain: &BitcoinRpc) -> Result<()> {
+    let address = record.htlc()?.address(config.network()?);
+    let funding = chain.fund(&address, Amount::from_sat(record.deposit_sat))?;
+
+    let script_pubkey = address.script_pubkey();
+    let (vout, sats) = funding
+        .output
+        .iter()
+        .enumerate()
+        .find(|(_, output)| output.script_pubkey == script_pubkey)
+        .map(|(vout, output)| (vout as u32, output.value.to_sat()))
+        .ok_or("the funded transaction does not pay the HTLC")?;
+
+    record.funding_tx = Some(serialize_hex(&funding));
+    record.funding = Some(Funding {
+        txid: funding.compute_txid().to_string(),
+        vout,
+        sats,
+    });
+
     // Persist before broadcasting, so a crash here still leaves a swap the
     // daemon can finish.
-    store.save(&record)?;
+    config.store()?.save(record)?;
 
     let deposit_txid = chain.broadcast(&funding)?;
     if deposit_txid != funding.compute_txid() {
@@ -304,18 +362,23 @@ fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<SwapReco
             format!("node accepted the deposit as an unexpected txid {deposit_txid}").into(),
         );
     }
-
-    Ok(record)
+    Ok(())
 }
 
 fn new_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<()> {
     let record = create_swap(config, request)?;
 
     eprintln!(
-        "swap created: deposit {} sat locked until height {}",
-        record.deposit_sat, record.locktime
+        "swap offered: {} sat on chain for {} over Lightning, {} sat bond, refund locktime {}",
+        record.amount_sat,
+        record.invoice_sat(),
+        record.bond_sat,
+        record.locktime
     );
     println!("id={}", record.id);
+    println!("bond_bolt11={}", record.bond_bolt11);
+    println!("bond_sat={}", record.bond_sat);
+    println!("bond_by={}", record.bond_by);
     println!("bolt11={}", record.bolt11);
     println!("htlc_address={}", record.htlc_address);
     println!("payment_hash={}", record.payment_hash);
@@ -451,6 +514,11 @@ fn tick(config: &NodeConfig) -> Result<()> {
             // and `maker status` are where progress shows up.
             Action::Wait(_) | Action::Done => {}
 
+            Action::Fund => match fund_swap(&mut record, config, &chain) {
+                Ok(()) => note(&record, "bond paid: deposit funded".to_owned()),
+                Err(e) => note(&record, format!("could not fund the deposit: {e}")),
+            },
+
             Action::RebroadcastFunding => {
                 let tx = decode_hex(record.funding_tx.as_deref().unwrap_or_default())?;
                 match chain.broadcast(&tx) {
@@ -525,6 +593,10 @@ fn observe(
         funding_confirmations,
         refund_confirmations,
         deposit_spent,
+        // Only asked while there is nothing to fund: the daemon funds only once
+        // the bond is in, so a swap with a deposit has already collected it.
+        bond_paid: record.funding.is_some()
+            || lightning.invoice_state(&record.bond_payment_hash())? == InvoiceState::Settled,
         invoice: lightning.invoice_state(&record.payment_hash)?,
     })
 }
@@ -558,6 +630,8 @@ fn status(config: &NodeConfig, id: Option<&str>) -> Result<()> {
         println!("fee={}", record.fee_sat);
         println!("invoice={}", record.invoice_sat());
         println!("deposit={}", record.deposit_sat);
+        println!("bond={}", record.bond_sat);
+        println!("bond_by={}", record.bond_by);
         println!("locktime={}", record.locktime);
         println!("htlc_address={}", record.htlc_address);
         println!(

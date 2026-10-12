@@ -48,9 +48,9 @@ print(value)
 ' "$1"
 }
 
-# Two payments come out of the taker's node, so say so now rather than halfway
-# through.
-require_outbound "$((AMOUNT * 2 + 10000))" taker
+# Two swaps, and a bond each, come out of the taker's node, so say so now rather
+# than halfway through.
+require_outbound "$((AMOUNT * 2 + 20000))" taker
 
 echo "== build and start the three services =="
 cargo build --quiet --release --target wasm32-unknown-unknown -p swapsite-wasm
@@ -92,13 +92,29 @@ verdict() {  # state, locktime, [preimage], [outpoint]
 PAID_SWAP=""
 make_and_pay() {  # echo "id locktime preimage outpoint sats"
   local swap id hash deposit locktime refund_pubkey verified vout sats preimage
+  preimage=""
   swap=$(curl -s -X POST \
     -d "{\"amount\":$AMOUNT,\"claim_pubkey\":\"$TAKER_PUBKEY\"}" "$COORD_URL/swaps")
   id=$(printf '%s' "$swap" | jget .id)
   hash=$(printf '%s' "$swap" | jget .payment_hash)
-  deposit=$(printf '%s' "$swap" | jget .deposit_txid)
   locktime=$(printf '%s' "$swap" | jget .locktime)
   refund_pubkey=$(printf '%s' "$swap" | jget .refund_pubkey)
+
+  # The bond comes first: the maker funds nothing until it is in, and dev pay
+  # stands in for the taker's wallet for both payments.
+  paid=$(curl -s -X POST "$COORD_URL/dev/pay/$id" | jget .paid)
+  [ "$paid" = "bond" ] || fail "dev pay did not pay the bond for $id"
+
+  deposit=""
+  for _ in $(seq 1 40); do
+    deposit=$(curl -s "$COORD_URL/swaps/$id" | python3 -c '
+import json, sys
+print(json.load(sys.stdin).get("deposit_txid") or "")
+')
+    [ -n "$deposit" ] && break
+    sleep 0.5
+  done
+  [ -n "$deposit" ] || fail "the maker never funded $id after its bond"
 
   mine 1
   verified=$(taker verify-deposit --payment-hash "$hash" --locktime "$locktime" \

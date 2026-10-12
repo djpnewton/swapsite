@@ -17,8 +17,13 @@ and Lightning HTLCs. The coordinator cannot move funds.
 
 M0 through M2 are done. A complete swap runs end to end on regtest: a maker
 daemon that settles and refunds on its own, a taker that runs in WASM with no
-node, and a web page that quotes the swap, verifies the deposit itself, pays and
-claims. Next are the L-BTC legs.
+node, and a web page that quotes the swap, pays the bond that starts it,
+verifies the deposit itself, pays and claims. Next are the L-BTC legs.
+
+Nothing is funded until the taker has paid a small non-refundable bond, which
+covers the maker's entry and exit fees. Without it, abandoning a swap would be
+free: the taker would risk nothing while the maker's capital sat in the HTLC for
+the whole locktime.
 
 ```bash
 cargo test                       # unit tests, includes real script verification
@@ -26,7 +31,7 @@ docker compose -f docker/docker-compose.yml up -d
 ./scripts/regtest-init.sh        # fund nodes, open a balanced channel
 ./scripts/regtest-onchain.sh     # fund, claim and refund an HTLC on-chain
 ./scripts/regtest-swap.sh        # one complete swap, both legs, plus the failure path
-./scripts/regtest-maker.sh       # the daemon: cold-start settle and timed refund
+./scripts/regtest-maker.sh       # the daemon: bond, cold-start settle and timed refund
 ./scripts/regtest-wasm.sh        # the browser-side taker, through a relay
 ./scripts/regtest-coordinator.sh # the whole flow: quote, verify, pay, claim, recover
 ./scripts/regtest-recovery.sh    # a lost page, a deadline, and a maker that reneges

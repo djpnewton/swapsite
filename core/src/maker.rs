@@ -35,12 +35,27 @@ pub struct SwapRecord {
     pub deposit_sat: u64,
     pub claim_fee_sat: u64,
     pub refund_fee_sat: u64,
+    /// What the taker pays up front, over Lightning, before anything is funded.
+    ///
+    /// Non-refundable on purpose: it covers the entry and exit fees, so
+    /// abandoning a swap costs the taker money rather than nothing at all.
+    #[serde(default)]
+    pub bond_sat: u64,
+    /// The height the bond has to be in by.
+    ///
+    /// Funding later than this would leave less than `locktime_margin` between
+    /// the deposit and the refund, so the maker would rather not fund at all.
+    #[serde(default)]
+    pub bond_by: u32,
     pub claim_pubkey: String,
     pub refund_secret: String,
     pub refund_pubkey: String,
     pub locktime: u32,
     pub htlc_address: String,
     pub bolt11: String,
+    /// The bond's bolt11. A plain invoice, not a hold one: paying it is final.
+    #[serde(default)]
+    pub bond_bolt11: String,
     /// Signed deposit transaction, hex.
     ///
     /// Persisted before it is broadcast, so a crash can always be recovered
@@ -70,6 +85,8 @@ pub struct Observed {
     /// The record only ever holds the refund this daemon built, so a refund
     /// from anywhere else is invisible without this.
     pub deposit_spent: bool,
+    /// Whether the taker's bond has been paid. Nothing is funded before it is.
+    pub bond_paid: bool,
     pub invoice: InvoiceState,
 }
 
@@ -80,6 +97,8 @@ pub enum Action {
     Wait(&'static str),
     /// Finished, one way or the other.
     Done,
+    /// The bond is in: fund the on-chain leg.
+    Fund,
     /// The deposit transaction still is not in a block: send it again.
     RebroadcastFunding,
     /// The taker paid and the deposit is safe: settle, revealing the preimage.
@@ -119,9 +138,18 @@ pub struct PublicSwap {
     pub invoice_sat: u64,
     pub claim_fee_sat: u64,
     pub deposit_sat: u64,
+    /// What the taker pays over Lightning before the maker will fund anything.
+    #[serde(default)]
+    pub bond_sat: u64,
+    /// The height the bond has to be in by.
+    #[serde(default)]
+    pub bond_by: u32,
     pub locktime: u32,
     pub payment_hash: PaymentHash,
     pub bolt11: String,
+    /// The bond's invoice, paid before the maker funds.
+    #[serde(default)]
+    pub bond_bolt11: String,
     pub claim_pubkey: String,
     pub refund_pubkey: String,
     pub htlc_address: String,
@@ -147,9 +175,12 @@ impl SwapRecord {
             invoice_sat: self.invoice_sat(),
             claim_fee_sat: self.claim_fee_sat,
             deposit_sat: self.deposit_sat,
+            bond_sat: self.bond_sat,
+            bond_by: self.bond_by,
             locktime: self.locktime,
             payment_hash: self.payment_hash,
             bolt11: self.bolt11.clone(),
+            bond_bolt11: self.bond_bolt11.clone(),
             claim_pubkey: self.claim_pubkey.clone(),
             refund_pubkey: self.refund_pubkey.clone(),
             htlc_address: self.htlc_address.clone(),
@@ -188,6 +219,11 @@ impl SwapRecord {
     /// The maker's refund secret. Never leaves the maker.
     pub fn refund_key(&self) -> Result<SecretKey, RecordError> {
         self.field("refund_secret", &self.refund_secret)
+    }
+
+    /// The hash the bond's invoice is locked to.
+    pub fn bond_payment_hash(&self) -> PaymentHash {
+        self.preimage.bond_payment_hash()
     }
 
     /// Rebuild the HTLC this swap is locked to.
@@ -288,6 +324,21 @@ pub fn plan(record: &SwapRecord, observed: &Observed) -> Action {
 
     let deposited = observed.funding_confirmations >= 1;
 
+    // Nothing is funded until the bond is in. Funding first is what makes
+    // walking away free: it would cost the taker nothing to park the maker's
+    // capital for the whole locktime.
+    if record.funding.is_none() {
+        if !observed.bond_paid {
+            return Action::Wait("waiting for the taker's bond");
+        }
+        // A late bond is a bond the maker keeps: funding into what is left of
+        // the window would hand the taker a deposit it cannot safely pay for.
+        if observed.height > record.bond_by {
+            return Action::Wait("the bond arrived too late to fund");
+        }
+        return Action::Fund;
+    }
+
     // A deposit we have not managed to get mined yet.
     if record.funding_tx.is_some() && !deposited {
         return Action::RebroadcastFunding;
@@ -341,12 +392,15 @@ mod tests {
             deposit_sat: 32_000,
             claim_fee_sat: 2_000,
             refund_fee_sat: 2_000,
+            bond_sat: 4_000,
+            bond_by: 200,
             claim_pubkey: claim_pubkey.to_string(),
             refund_secret: hex::encode(refund.secret_bytes()),
             refund_pubkey: refund_pubkey.to_string(),
             locktime,
             htlc_address: htlc.address(bitcoin::Network::Regtest).to_string(),
             bolt11: "lnbcrt1...".to_owned(),
+            bond_bolt11: "lnbcrt1bond...".to_owned(),
             funding_tx: Some("00".to_owned()),
             funding: Some(Funding {
                 txid: "00".repeat(32),
@@ -364,7 +418,17 @@ mod tests {
             funding_confirmations: funding,
             refund_confirmations: 0,
             deposit_spent: false,
+            // A funding tx only exists because the bond was already in.
+            bond_paid: true,
             invoice,
+        }
+    }
+
+    /// The same, with the bond paid or not.
+    fn bond(paid: bool) -> Observed {
+        Observed {
+            bond_paid: paid,
+            ..observed(100, 0, InvoiceState::Open)
         }
     }
 
@@ -435,6 +499,78 @@ mod tests {
         let parsed: PublicSwap = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, record.public().unwrap());
         assert!(parsed.preimage.is_none());
+    }
+
+    #[test]
+    fn the_bond_is_the_only_way_a_swap_starts() {
+        let mut record = record(500);
+        record.funding = None;
+        record.funding_tx = None;
+
+        // The bond pays the entry and exit fees, so the entry waits for it.
+        assert_eq!(
+            plan(&record, &bond(false)),
+            Action::Wait("waiting for the taker's bond")
+        );
+        assert_eq!(plan(&record, &bond(true)), Action::Fund);
+    }
+
+    #[test]
+    fn a_bond_that_arrives_too_late_is_kept_and_nothing_is_funded() {
+        let mut record = record(500);
+        record.funding = None;
+        record.funding_tx = None;
+
+        // Funding here would leave the deposit refundable almost at once, so
+        // the maker takes the bond as compensation and does not fund.
+        let late = Observed {
+            height: record.bond_by + 1,
+            ..bond(true)
+        };
+        assert_eq!(
+            plan(&record, &late),
+            Action::Wait("the bond arrived too late to fund")
+        );
+    }
+
+    #[test]
+    fn a_funded_swap_has_already_collected_its_bond() {
+        // A deposit only exists because the daemon funded it, and it only funds
+        // once the bond is in, so the shipped view of a funded swap is "paid".
+        let record = record(500);
+        assert_eq!(
+            plan(&record, &observed(100, 1, InvoiceState::Open)),
+            Action::Wait("waiting for the taker to pay")
+        );
+    }
+
+    #[test]
+    fn the_bond_hash_cannot_unlock_the_on_chain_leg() {
+        use bitcoin::hashes::{sha256, Hash};
+
+        let record = record(500);
+        let bond = record.bond_payment_hash();
+        assert_ne!(bond, record.payment_hash);
+
+        // Settling the bond reveals its preimage, which is `sha256(preimage)`:
+        // the value the bond invoice is locked to, and it must not open the HTLC.
+        let revealed = record.preimage.bond_preimage();
+        let one_hash_out =
+            Preimage::from_bytes(sha256::Hash::hash(record.preimage.as_bytes()).to_byte_array());
+        assert_eq!(revealed, one_hash_out);
+        assert!(bond.matches(&revealed), "the bond is locked to this value");
+        assert!(
+            !record.payment_hash.matches(&revealed),
+            "a settled bond would have revealed the swap's secret"
+        );
+    }
+
+    #[test]
+    fn the_public_view_carries_the_bond() {
+        let record = record(500);
+        let public = record.public().unwrap();
+        assert_eq!(public.bond_sat, record.bond_sat);
+        assert_eq!(public.bond_bolt11, record.bond_bolt11);
     }
 
     #[test]

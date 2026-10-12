@@ -185,6 +185,17 @@ Registry of decisions:
   who paid from another wallet a manual copy-paste. It is published on settled
   swaps and on nothing else, and the field is absent rather than null before
   then, so a swap's public view cannot be read as "the secret is out".
+- **The taker pays a bond before anything is funded.** Funding first is what
+  makes walking away free: an abandoned swap would cost the taker nothing while
+  parking the maker's capital for the whole locktime. So the maker offers the
+  terms, the taker pays a non-refundable Lightning bond covering the entry and
+  exit fees, and only then does a deposit exist. The bond's hash is
+  `sha256(sha256(preimage))`, so settling it reveals nothing about the on-chain
+  leg. The cost is deliberate and bounded: the taker trusts the maker to fund
+  after taking the bond, which is why the bond is priced at cost rather than at
+  profit. This is the arrangement the Lightning Engineering pages describe as a
+  "non-refundable Lightning payment upfront ... to compensate for the
+  opportunity cost of funds being locked up".
 - **Recovery is a verdict, not a service.** Nobody can claim for the taker, so
   what the taker gets is a judgement - drawn from its own preimage, the chain,
   and the HTLC's own locktime - of whether a move is left. The page acts on it
@@ -241,6 +252,14 @@ Registry of decisions:
 - Fee bumping: a presigned refund can become un-broadcastable if fees rise.
   Needs CPFP or anchor outputs.
 - Maker LN liquidity: HODL invoices lock maker capital for up to `T`.
+- **Timelock ordering is not enforced.** `locktime_margin` (default 30) sits
+  below the invoice's CLTV delta (80), so the maker's refund path opens before
+  the taker's Lightning payment expires - and a maker can then refund the
+  deposit and still settle the payment, taking both legs. Demonstrated on
+  regtest. `LegTimelocks` encodes the right rule and is constructed only inside
+  its own unit tests. The fix is to validate at construction with a margin floor
+  above the invoice's CLTV delta, and to have the taker refuse to pay into a
+  deposit whose remaining window is too short.
 - Coordinator trust for status: the coordinator must learn of claims from chain
   observation, not from a counterparty's word.
 - Reorg handling differs per chain and per direction.

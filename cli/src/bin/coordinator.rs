@@ -61,6 +61,13 @@ enum Cmd {
         /// What the taker is told a claim will cost.
         #[arg(long, default_value_t = 2_000)]
         claim_fee: u64,
+        /// What the taker pays up front to the maker, in satoshis.
+        ///
+        /// The maker's cost recovery, not a margin: it covers the deposit and
+        /// refund transactions, and it is what stops an abandoned swap from
+        /// being free. Quoted so the page can show the real total.
+        #[arg(long, default_value_t = 4_000)]
+        bond_fee: u64,
         #[arg(long, default_value = "regtest")]
         network: String,
         /// Compose file for the taker's Lightning node.
@@ -95,6 +102,8 @@ enum Cmd {
         fee_bps: u64,
         #[arg(long, default_value_t = 1)]
         min_fee_sat: u64,
+        #[arg(long, default_value_t = 4_000)]
+        bond_fee: u64,
     },
 }
 
@@ -109,11 +118,14 @@ fn main() -> Result<()> {
             amount,
             fee_bps,
             min_fee_sat,
+            bond_fee,
         } => {
             let fee = fee_for(amount, fee_bps, min_fee_sat);
             println!("amount_sat={amount}");
             println!("fee_sat={fee}");
             println!("invoice_sat={}", amount + fee);
+            println!("bond_sat={bond_fee}");
+            println!("total_sat={}", amount + fee + bond_fee);
             Ok(())
         }
 
@@ -127,6 +139,7 @@ fn main() -> Result<()> {
             fee_bps,
             min_fee_sat,
             claim_fee,
+            bond_fee,
             network,
             compose,
             lnd_rpc,
@@ -155,6 +168,7 @@ fn main() -> Result<()> {
                 fee_bps,
                 min_fee_sat,
                 claim_fee,
+                bond_fee,
                 network,
                 dev_pay,
             };
@@ -173,6 +187,8 @@ struct Service {
     fee_bps: u64,
     min_fee_sat: u64,
     claim_fee: u64,
+    /// What the taker pays the maker up front to start a swap.
+    bond_fee: u64,
     network: String,
     /// Present only with `--dev-pay`.
     dev_pay: Option<LnCli>,
@@ -216,6 +232,7 @@ impl Service {
                 "fee_bps": self.fee_bps,
                 "min_fee_sat": self.min_fee_sat,
                 "claim_fee_sat": self.claim_fee,
+                "bond_sat": self.bond_fee,
                 "dev_pay": self.dev_pay.is_some(),
             }),
         )
@@ -234,6 +251,8 @@ impl Service {
                 "fee_sat": fee,
                 "invoice_sat": amount + fee,
                 "claim_fee_sat": self.claim_fee,
+                "bond_sat": self.bond_fee,
+                "total_sat": amount + fee + self.bond_fee,
             }),
         )
     }
@@ -291,6 +310,7 @@ impl Service {
             "fee": self.fee(ask.amount),
             "claim_pubkey": ask.claim_pubkey,
             "claim_fee": self.claim_fee,
+            "bond_fee": self.bond_fee,
         })
         .to_string();
 
@@ -320,11 +340,12 @@ impl Service {
         }
     }
 
-    /// Dev only: pay the taker's invoice for it.
+    /// Dev only: pay what the taker's wallet would pay next.
     ///
     /// This stands in for the taker's own wallet. It is why the endpoint is off
     /// by default: with it on, the coordinator learns a preimage it would never
-    /// see in production.
+    /// see in production. Before the deposit exists the next thing to pay is the
+    /// bond, which reveals nothing, so that case answers with no preimage.
     fn pay(&self, id: &str) -> Response {
         let Some(lightning) = &self.dev_pay else {
             return Response::error(404, "dev pay is not enabled");
@@ -334,6 +355,13 @@ impl Service {
             Ok(swap) => swap,
             Err(e) => return Response::error(404, e.to_string()),
         };
+
+        if swap.deposit_txid.is_none() {
+            return match lightning.pay(&swap.bond_bolt11) {
+                Ok(_) => Response::json(200, &json!({ "paid": "bond" })),
+                Err(e) => Response::error(502, e.to_string()),
+            };
+        }
 
         // Blocks until the maker settles, which is the point: the response is
         // the preimage.
@@ -442,6 +470,7 @@ mod tests {
             fee_bps: 10,
             min_fee_sat: 1,
             claim_fee: 2_000,
+            bond_fee: 4_000,
             network: "regtest".to_owned(),
             dev_pay: dev_pay.then(|| {
                 LnCli::new(

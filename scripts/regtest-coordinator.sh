@@ -97,14 +97,15 @@ echo "== the coordinator asks the maker for a swap =="
 SWAP=$(curl -s -X POST -d "{\"amount\":$AMOUNT,\"claim_pubkey\":\"$TAKER_PUBKEY\"}" "$COORD_URL/swaps")
 ID=$(printf '%s' "$SWAP" | jget .id)
 HASH=$(printf '%s' "$SWAP" | jget .payment_hash)
-DEPOSIT=$(printf '%s' "$SWAP" | jget .deposit_txid)
 LOCKTIME=$(printf '%s' "$SWAP" | jget .locktime)
 REFUND_PUBKEY=$(printf '%s' "$SWAP" | jget .refund_pubkey)
 CLAIM_FEE=$(printf '%s' "$SWAP" | jget .claim_fee_sat)
 SWAP_INVOICE=$(printf '%s' "$SWAP" | jget .invoice_sat)
+BOND=$(printf '%s' "$SWAP" | jget .bond_bolt11)
+BOND_SAT=$(printf '%s' "$SWAP" | jget .bond_sat)
 [ "$SWAP_INVOICE" = "$INVOICE" ] || fail "the swap costs $SWAP_INVOICE but the quote said $INVOICE"
 echo "swap id:       $ID"
-echo "deposit:       $DEPOSIT"
+echo "bond:          $BOND_SAT sat, and nothing is funded until it is paid"
 
 # The coordinator must never be handed the maker's secrets, and a swap that has
 # not settled has no preimage to hand over - the field is absent, not null, so
@@ -113,6 +114,25 @@ if printf '%s' "$SWAP" | grep -q 'preimage\|secret'; then
   fail "an unsettled swap handed out a secret"
 fi
 echo "secrets:       none in the swap the page received"
+
+echo
+echo "== the taker pays the bond, and the maker funds =="
+# Dev pay stands in for the taker's wallet here too. The bond is the first
+# thing that wallet pays, and paying it reveals nothing worth having.
+BOND_PAID=$(curl -s -X POST "$COORD_URL/dev/pay/$ID" | jget .paid)
+[ "$BOND_PAID" = "bond" ] || fail "dev pay did not pay the bond (got '$BOND_PAID')"
+
+DEPOSIT=""
+for _ in $(seq 1 40); do
+  DEPOSIT=$(curl -s "$COORD_URL/swaps/$ID" | python3 -c '
+import json, sys
+print(json.load(sys.stdin).get("deposit_txid") or "")
+')
+  [ -n "$DEPOSIT" ] && break
+  sleep 0.5
+done
+[ -n "$DEPOSIT" ] || fail "the maker never funded the swap after its bond"
+echo "deposit:       $DEPOSIT"
 
 mine 1
 

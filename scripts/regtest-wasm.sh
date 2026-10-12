@@ -59,15 +59,22 @@ NEW=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
   --claim-pubkey "$TAKER_PUBKEY" --locktime-margin 30 2>/dev/null)
 ID=$(printf '%s\n' "$NEW" | field id)
 BOLT11=$(printf '%s\n' "$NEW" | field bolt11)
+BOND=$(printf '%s\n' "$NEW" | field bond_bolt11)
 HASH=$(printf '%s\n' "$NEW" | field payment_hash)
-DEPOSIT=$(printf '%s\n' "$NEW" | field deposit_txid)
 LOCKTIME=$(printf '%s\n' "$NEW" | field locktime)
 REFUND_PUBKEY=$(printf '%s\n' "$NEW" | field refund_pubkey)
 SWAP_AMOUNT=$(printf '%s\n' "$NEW" | field amount)
 CLAIM_FEE=$(printf '%s\n' "$NEW" | field claim_fee)
-mine 1
 echo "swap id:       $ID"
 echo "amount:        $SWAP_AMOUNT sat over Lightning"
+echo "deposit:       not funded yet, and no daemon is running"
+
+echo
+echo "== the daemon funds it, but only once the bond is in =="
+maker run --dir "$SWAPS" --interval 1 > "$WORK/maker.out" 2> "$WORK/maker.err" &
+read -r DEPOSIT _ <<< "$(bond_and_fund "$SWAPS" "$ID" "$BOND")"
+mine 1
+echo "deposit:       $DEPOSIT (funded after the bond, not before)"
 
 echo
 echo "== taker checks the deposit through the relay =="
@@ -94,8 +101,6 @@ echo "rejected:      a deposit that does not pay this HTLC"
 
 echo
 echo "== the maker settles once the taker pays =="
-maker run --dir "$SWAPS" --interval 1 > "$WORK/maker.out" 2> "$WORK/maker.err" &
-
 require_outbound "$SWAP_AMOUNT" taker
 swapx ln pay --node taker --invoice "$BOLT11" \
   > "$WORK/pay.out" 2> "$WORK/pay.err" < /dev/null &

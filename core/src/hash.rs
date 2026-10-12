@@ -56,6 +56,22 @@ impl Preimage {
         let hash = sha256::Hash::hash(&self.0);
         PaymentHash(hash.to_byte_array())
     }
+
+    /// The preimage of the bond's invoice: this secret, one hash further out.
+    ///
+    /// The bond is a plain payment the maker collects whether or not the swap
+    /// completes, so it cannot share `payment_hash`: settling an invoice reveals
+    /// its preimage, and that would hand over the on-chain leg's secret. One
+    /// more hash hides `self` completely.
+    pub fn bond_preimage(&self) -> Preimage {
+        let inner = sha256::Hash::hash(&self.0);
+        Preimage(inner.to_byte_array())
+    }
+
+    /// The hash the bond's invoice is locked to.
+    pub fn bond_payment_hash(&self) -> PaymentHash {
+        self.bond_preimage().payment_hash()
+    }
 }
 
 impl PaymentHash {

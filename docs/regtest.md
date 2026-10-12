@@ -290,22 +290,26 @@ route testable without `--dev-pay`.
 ### Paying a swap from the panel
 
 This is the flow the invoice display exists for, and it is worth walking once
-because it exercises three things at the same time:
+because it exercises four things at the same time:
 
-1. On the taker page, **Get a quote**. The card now shows the bolt11 to pay.
-2. Paste that into the panel and **Pay**. That request stays open until the maker
-   settles, and it should: `lncli payinvoice` waits for the payment to reach a
-   terminal state, and a held payment has not reached one - it is a promise, not
-   a settlement. The panel serves each connection on its own thread, so it keeps
-   answering, which is what makes step 3 possible at all.
-3. **Mine a block** in the panel. The maker settles on its next tick, the payment
+1. On the taker page, **Get a quote**. The card shows the **bond**: pay it before
+   `bond_by`, because nothing is funded until it is in.
+2. Paste the bond into the panel and **Pay**. It is a plain invoice, not a hold
+   one, so that payment settles at once - nothing is held, and the maker funds on
+   its next tick. The card then shows the deposit and the swap's own invoice.
+3. Paste that invoice into the panel and **Pay**. This one stays open until the
+   maker settles, and it should: `lncli payinvoice` waits for the payment to
+   reach a terminal state, and a held payment has not reached one - it is a
+   promise, not a settlement. The panel serves each connection on its own thread,
+   so it keeps answering, which is what makes step 4 possible at all.
+4. **Mine a block** in the panel. The maker settles on its next tick, the payment
    completes, and the swap reads `settled`.
-4. Nothing else. The page has been saying `find_preimage` - it has no preimage,
+5. Nothing else. The page has been saying `find_preimage` - it has no preimage,
    because it never paid - and by the next poll the maker has settled and
    published one, so the verdict turns into `claim`. Name an address and it
    claims; with an address already on the card it claims by itself.
 
-Step 4 is worth being precise about, because it is the one place the two sides
+Step 5 is worth being precise about, because it is the one place the two sides
 have to agree. Settling *is* the reveal: a hold invoice is settled by handing
 over the preimage, which is what tells the Lightning network the payment is
 claimable, so the preimage is public from that moment. A maker that withheld it
@@ -313,6 +317,13 @@ would not be protecting anything - it would only be costing a taker who paid fro
 another wallet a manual copy-paste. So `PublicSwap` carries the preimage on a
 **settled** swap and on nothing else, and the field is absent rather than null
 before then, so a swap's public view cannot be read as "the secret is out".
+
+Step 2 is the bond, and it is why the deposit does not exist when the page first
+shows the swap. The maker will not fund until it has been paid: funding first
+would make this whole flow free to walk away from at step 3, since the taker
+would risk nothing while the maker's capital sat in the HTLC for the locktime.
+The bond is priced at cost - the entry and exit fees - so the maker recovers them
+and gains nothing.
 
 The copy-paste route stays as the fallback. A maker that is unreachable, or one
 running an older build, leaves the page at `find_preimage`, and then the wallet

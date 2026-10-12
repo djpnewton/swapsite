@@ -93,6 +93,29 @@ fail() {
   exit 1
 }
 
+# Pay the bond a swap asks for and wait for the daemon to fund it.
+#
+# Nothing is funded until the bond is in, so a deposit does not exist at the
+# moment a swap is offered: it appears once the maker has collected the bond.
+# Echoes "<txid> <vout>" for the deposit.
+bond_and_fund() {
+  local store="$1" id="$2" bolt11="$3" node="${4:-taker}" found=""
+  swapx ln pay --node "$node" --invoice "$bolt11" \
+    > "$WORK/bond.out" 2> "$WORK/bond.err" < /dev/null \
+    || { cat "$WORK/bond.err" >&2; fail "the bond payment failed"; }
+  for _ in $(seq 1 40); do
+    found=$(python3 -c '
+import json, sys
+funding = json.load(open(sys.argv[1])).get("funding")
+if funding:
+    print(funding["txid"], funding["vout"])
+' "$store/$id.json" 2>/dev/null) || true
+    [ -n "$found" ] && { echo "$found"; return 0; }
+    sleep 1
+  done
+  fail "the maker never funded $id after its bond was paid"
+}
+
 # Poll a swap record until it reaches `wanted`.
 await_swap_state() {
   local id="$1" wanted="$2" store="$3" state=""
