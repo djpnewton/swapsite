@@ -210,7 +210,7 @@ echo "refund opens:  height $LOCKTIME2 (now $(height))"
 REFUND_SECRET=$(python3 -c '
 import json, sys
 print(json.load(open(sys.argv[1]))["refund_secret"])
-' "$SWAPS/$ID2.json")
+' "$SWAPS/ln2btc/$ID2.json")
 
 jswap() { curl -s "$COORD_URL/swaps/$ID2" | jget "$1"; }
 

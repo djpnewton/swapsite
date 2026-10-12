@@ -30,6 +30,7 @@ use swapsite_core::{
     maker_ln2btc::{
         plan, reconcile, Action, Ln2btcFunding, Ln2btcPublicSwap, Ln2btcRecord, Observed,
     },
+    order::{Order, SwapKind},
     params::{
         LegTimelocks, DEFAULT_CLTV_DELTA, DEFAULT_LOCKTIME_MARGIN, MIN_MARGIN_BLOCKS,
         PAYMENT_WINDOW_BLOCKS,
@@ -235,16 +236,22 @@ impl NodeConfig {
         )?)
     }
 
+    /// The ln2btc records: one directory per mechanism under the swap root.
     fn store(&self) -> Result<SwapStore> {
-        Ok(SwapStore::open(&self.dir)?)
+        Ok(SwapStore::open(self.dir.join(SwapKind::Ln2btc.dir()))?)
+    }
+
+    /// The order book: one line per swap, whichever mechanism carried it.
+    fn order_store(&self) -> Result<SwapStore<Order>> {
+        Ok(SwapStore::open(self.dir.join("orders"))?)
     }
 
     /// The store for the btc2ln direction's swaps.
     ///
-    /// A subdirectory of `--dir`, because a store is typed to one kind of
-    /// record: both directions in one directory would be read as one.
+    /// A directory of its own under the swap root, because a store is typed to
+    /// one kind of record: both mechanisms in one directory would be read as one.
     fn btc2ln_store(&self) -> Result<SwapStore<Btc2lnRecord>> {
-        Ok(SwapStore::open(self.dir.join("btc2ln"))?)
+        Ok(SwapStore::open(self.dir.join(SwapKind::Btc2ln.dir()))?)
     }
 }
 
@@ -361,6 +368,14 @@ fn btc2ln_offer(
     // Saved before it is offered, for the same reason the other direction saves
     // before it funds: a deposit nobody wrote down is one nobody claims.
     store.save(&record)?;
+    // Written second, so a listing cannot show a swap with no record behind it.
+    config.order_store()?.save(&Order::new(
+        record.id.clone(),
+        SwapKind::Btc2ln,
+        unix_now()?,
+        record.deposit_sat,
+        record.receive_sat,
+    )?)?;
 
     Ok(record)
 }
@@ -698,6 +713,15 @@ fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<Ln2btcRe
     // Saved before it is offered: a bond the daemon does not remember collecting
     // is a bond it never collects.
     store.save(&record)?;
+    // The order is written second, so a listing can never show a swap that has
+    // no record behind it.
+    config.order_store()?.save(&Order::new(
+        record.id.clone(),
+        SwapKind::Ln2btc,
+        unix_now()?,
+        record.invoice_sat(),
+        record.amount_sat,
+    )?)?;
     Ok(record)
 }
 

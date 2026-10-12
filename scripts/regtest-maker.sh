@@ -216,7 +216,7 @@ read -r VOUT3 SATS3 <<< "$(find_output "$DEPOSIT3" "$ADDRESS3")"
 REFUND_SECRET3=$(python3 -c '
 import json, sys
 print(json.load(open(sys.argv[1]))["refund_secret"])
-' "$SWAPS/$ID3.json")
+' "$SWAPS/ln2btc/$ID3.json")
 
 while [ "$(height)" -lt "$LOCKTIME3" ]; do mine "$(( LOCKTIME3 - $(height) ))"; done
 RAW3=$(swapx refund --payment-hash "$HASH3" --locktime "$LOCKTIME3" \
@@ -265,7 +265,7 @@ pkill -f "maker ln2btc-run --dir $SWAPS" 2>/dev/null || true
 OWN=$(python3 -c '
 import json, sys
 print(json.load(open(sys.argv[1]))["refund_tx"] or "none")
-' "$SWAPS/$ID3.json")
+' "$SWAPS/ln2btc/$ID3.json")
 [ "$OWN" = "none" ] || fail "the daemon built a refund for an already-refunded deposit"
 echo "own refund:    none, so nothing is being rebroadcast forever"
 

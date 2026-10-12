@@ -16,6 +16,7 @@ pub mod htlc;
 pub mod lightning;
 pub mod maker_btc2ln;
 pub mod maker_ln2btc;
+pub mod order;
 pub mod params;
 pub mod recovery;
 pub mod spend;

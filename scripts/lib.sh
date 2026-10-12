@@ -109,7 +109,7 @@ import json, sys
 funding = json.load(open(sys.argv[1])).get("funding")
 if funding:
     print(funding["txid"], funding["vout"])
-' "$store/$id.json" 2>/dev/null) || true
+' "$store/ln2btc/$id.json" 2>/dev/null) || true
     [ -n "$found" ] && { echo "$found"; return 0; }
     sleep 1
   done

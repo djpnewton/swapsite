@@ -15,6 +15,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use swapsite_core::maker_btc2ln::Btc2lnRecord;
 use swapsite_core::maker_ln2btc::Ln2btcRecord;
+use swapsite_core::order::Order;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -45,6 +46,12 @@ impl Stored for Ln2btcRecord {
 }
 
 impl Stored for Btc2lnRecord {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Stored for Order {
     fn id(&self) -> &str {
         &self.id
     }
