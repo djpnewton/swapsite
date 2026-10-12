@@ -161,6 +161,7 @@ function verdict(id) {
     // Unknown is assumed unspent, so a page that could not reach the relay
     // still offers the claim rather than calling a recoverable swap dead.
     deposit_unspent: entry.deposit_unspent !== false,
+    cltv_delta: swap.cltv_delta,
     deadline: swap.locktime,
     height,
   });
@@ -247,13 +248,27 @@ async function checkDeposit(id) {
 }
 
 async function pay(id) {
-  const { swap } = session.swaps[id];
+  const entry = session.swaps[id];
+  const { swap } = entry;
   // Before the deposit exists the only thing to pay is the bond, and paying it
   // reveals nothing: a bond's preimage unlocks no HTLC.
   const bonded = Boolean(swap.deposit_txid);
   update(id, { busy: "paying", error: null });
 
   try {
+    if (bonded) {
+      // Both of these are the taker's own protection, and neither is something
+      // the maker can be trusted to have done.
+      if (verdict(id)?.action.kind === "too_late_to_pay") {
+        throw new Error(
+          "the maker's refund would open before a payment made now expires - do not pay into this swap",
+        );
+      }
+      if (!entry.verified) {
+        throw new Error("check the deposit before paying");
+      }
+    }
+
     if (config.dev_pay) {
       // Stand-in for the taker's wallet. In production the page pays through
       // WebLN and the preimage never touches the coordinator.
@@ -390,7 +405,8 @@ function card(id, entry) {
       : "";
 
   const actions = [];
-  if (!gone) {
+  const tooLate = recovery?.action.kind === "too_late_to_pay";
+  if (!gone && !tooLate) {
     if (!bonded) {
       // No deposit yet, so no check and no swap to pay for - only the bond.
       actions.push(
@@ -471,6 +487,8 @@ function notice(recovery) {
       return `<p class="error urgent">The refund path is open, so the maker can take this deposit back at any moment. Claim now - a claim still wins, but only if it gets there first.</p>`;
     case "find_preimage":
       return `<p class="error${urgent ? " urgent" : ""}">Your payment settled, so the preimage is public - the maker publishes it when it settles and this clears by itself. If the maker cannot be reached, paste it from the wallet that paid, before height ${deadline}.</p>`;
+    case "too_late_to_pay":
+      return `<p class="error">Only ${action.blocks_left} blocks until the maker may refund, and a payment made now would not expire before that. Paying into this swap could leave your payment settled with the deposit already refunded, so do not.</p>`;
     case "gone":
       return `<p class="error">This deposit has been spent, so there is no longer anything to claim. If you claimed it yourself, your coins are at the address you named. If you did not, the maker refunded it and the payment you made went with it.</p>`;
     default:

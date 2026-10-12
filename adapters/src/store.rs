@@ -138,6 +138,7 @@ mod tests {
             refund_secret: hex::encode(refund.secret_bytes()),
             refund_pubkey: refund_pubkey.to_string(),
             locktime: 500,
+            cltv_delta: 40,
             htlc_address: htlc.address(Network::Regtest).to_string(),
             bolt11: "lnbcrt1...".to_owned(),
             bond_bolt11: "lnbcrt1bond...".to_owned(),

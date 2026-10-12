@@ -16,8 +16,9 @@ mkdir -p "$SWAPS"
 cleanup() {
   # Match on the store directory rather than trusting a pid: a missed daemon
   # keeps rewriting its records and makes the next run lie.
-  pkill -f "maker run --dir $SWAPS" 2>/dev/null
-  return 0
+  #
+  # A non-zero pkill under `set -e` would take the exit status with it.
+  pkill -f "maker run --dir $SWAPS" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -34,7 +35,7 @@ TAKER_PUBKEY=$(printf '%s\n' "$TAKER" | field pubkey)
 
 echo "== the daemon is not running =="
 NEW=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
-  --claim-pubkey "$TAKER_PUBKEY" --locktime-margin 30 2>/dev/null)
+  --claim-pubkey "$TAKER_PUBKEY" 2>/dev/null)
 ID=$(printf '%s\n' "$NEW" | field id)
 BOLT11=$(printf '%s\n' "$NEW" | field bolt11)
 BOND=$(printf '%s\n' "$NEW" | field bond_bolt11)
@@ -133,7 +134,7 @@ echo "swap done:     $SWAP_AMOUNT sat moved Lightning -> on-chain"
 echo
 echo "== a second swap: the taker pays the bond and then walks away =="
 NEW2=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
-  --claim-pubkey "$TAKER_PUBKEY" --locktime-margin 8 2>/dev/null)
+  --claim-pubkey "$TAKER_PUBKEY" 2>/dev/null)
 ID2=$(printf '%s\n' "$NEW2" | field id)
 LOCKTIME2=$(printf '%s\n' "$NEW2" | field locktime)
 BOND2=$(printf '%s\n' "$NEW2" | field bond_bolt11)
@@ -157,7 +158,7 @@ STATE=$(maker status --dir "$SWAPS" --id "$ID2" | field state)
   || fail "the daemon acted before the timeout (state=$STATE)"
 echo "before timeout: still $STATE, deposit still locked"
 
-while [ "$(height)" -lt "$LOCKTIME2" ]; do mine 1; done
+while [ "$(height)" -lt "$LOCKTIME2" ]; do mine "$(( LOCKTIME2 - $(height) ))"; done
 
 # The daemon builds and broadcasts the refund as soon as the timeout opens. The
 # swap only reads as `refunded` once that transaction is actually in a block, so
@@ -190,7 +191,7 @@ sleep 0.5
 echo
 echo "== a third swap, refunded by someone else while the daemon is down =="
 NEW3=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
-  --claim-pubkey "$TAKER_PUBKEY" --locktime-margin 8 2>/dev/null)
+  --claim-pubkey "$TAKER_PUBKEY" 2>/dev/null)
 ID3=$(printf '%s\n' "$NEW3" | field id)
 HASH3=$(printf '%s\n' "$NEW3" | field payment_hash)
 ADDRESS3=$(printf '%s\n' "$NEW3" | field htlc_address)
@@ -217,7 +218,7 @@ import json, sys
 print(json.load(open(sys.argv[1]))["refund_secret"])
 ' "$SWAPS/$ID3.json")
 
-while [ "$(height)" -lt "$LOCKTIME3" ]; do mine 1; done
+while [ "$(height)" -lt "$LOCKTIME3" ]; do mine "$(( LOCKTIME3 - $(height) ))"; done
 RAW3=$(swapx refund --payment-hash "$HASH3" --locktime "$LOCKTIME3" \
   --claim-pubkey "$TAKER_PUBKEY" --refund-key "$REFUND_SECRET3" \
   --outpoint "$DEPOSIT3:$VOUT3" --value "$SATS3" \
@@ -232,6 +233,32 @@ maker run --dir "$SWAPS" --interval 1 > "$WORK/maker3.out" 2> "$WORK/maker3.err"
 STATE=$(await_swap_state "$ID3" refunded "$SWAPS") \
   || fail "the daemon never noticed the deposit was gone (state=$STATE)"
 echo "swap state:    $STATE"
+
+# --- timeouts that cannot be safe -----------------------------------------
+#
+# The refund has to outlive the Lightning payment the taker makes. A margin that
+# does not would let the maker refund the deposit and still settle the payment,
+# so the swap is refused before anything is offered or funded.
+
+echo
+echo "== a refund that would open inside the payment's lifetime is refused =="
+if maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
+    --claim-pubkey "$TAKER_PUBKEY" --locktime-margin 30 \
+    > /dev/null 2> "$WORK/bad-margin.err"; then
+  fail "the maker offered a swap whose refund opens inside the payment's life"
+fi
+grep -q "refusing to offer this swap" "$WORK/bad-margin.err" \
+  || fail "expected the maker to refuse the margin, got: $(cat "$WORK/bad-margin.err")"
+echo "refused:       $(cut -c1-72 < "$WORK/bad-margin.err")"
+
+# The smallest margin the protocol allows is enough, so the floor is a floor.
+echo
+NEW4=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
+  --claim-pubkey "$TAKER_PUBKEY" --locktime-margin 52 2>/dev/null)
+ID4=$(printf '%s\n' "$NEW4" | field id)
+[ -n "$ID4" ] || fail "a margin of exactly 52 was refused"
+echo "accepted:      a margin of 52 blocks (40 CLTV + 12)"
+pkill -f "maker run --dir $SWAPS" 2>/dev/null || true
 
 # It has to adopt what happened rather than act on it: a refund of its own here
 # would be a transaction it could never get mined.

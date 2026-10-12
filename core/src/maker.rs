@@ -51,6 +51,13 @@ pub struct SwapRecord {
     pub refund_secret: String,
     pub refund_pubkey: String,
     pub locktime: u32,
+    /// The Lightning leg's final CLTV delta, in blocks.
+    ///
+    /// Kept because the on-chain refund must outlive the payment, and a record
+    /// from before this was stored is assumed to be the protocol default rather
+    /// than whatever the node happened to pick.
+    #[serde(default = "default_cltv_delta")]
+    pub cltv_delta: u32,
     pub htlc_address: String,
     pub bolt11: String,
     /// The bond's bolt11. A plain invoice, not a hold one: paying it is final.
@@ -119,6 +126,12 @@ pub enum RecordError {
     State(#[from] StateError),
 }
 
+/// Shared by the record and the public view, so a stored swap and a served one
+/// agree about the Lightning timeout.
+fn default_cltv_delta() -> u32 {
+    crate::params::DEFAULT_CLTV_DELTA
+}
+
 /// The shareable description of a swap.
 ///
 /// Everything a taker or a coordinator needs, and nothing else. The refund
@@ -150,6 +163,9 @@ pub struct PublicSwap {
     /// The bond's invoice, paid before the maker funds.
     #[serde(default)]
     pub bond_bolt11: String,
+    /// The Lightning leg's final CLTV delta, in blocks.
+    #[serde(default = "default_cltv_delta")]
+    pub cltv_delta: u32,
     pub claim_pubkey: String,
     pub refund_pubkey: String,
     pub htlc_address: String,
@@ -181,6 +197,7 @@ impl SwapRecord {
             payment_hash: self.payment_hash,
             bolt11: self.bolt11.clone(),
             bond_bolt11: self.bond_bolt11.clone(),
+            cltv_delta: self.cltv_delta,
             claim_pubkey: self.claim_pubkey.clone(),
             refund_pubkey: self.refund_pubkey.clone(),
             htlc_address: self.htlc_address.clone(),
@@ -398,6 +415,7 @@ mod tests {
             refund_secret: hex::encode(refund.secret_bytes()),
             refund_pubkey: refund_pubkey.to_string(),
             locktime,
+            cltv_delta: 40,
             htlc_address: htlc.address(bitcoin::Network::Regtest).to_string(),
             bolt11: "lnbcrt1...".to_owned(),
             bond_bolt11: "lnbcrt1bond...".to_owned(),

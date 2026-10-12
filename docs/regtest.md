@@ -173,16 +173,22 @@ target/debug/coordinator serve --listen 127.0.0.1:8090 \
 Build the module first: `./scripts/regtest-wasm.sh` does it, or
 `cargo build -p swapsite-wasm --release --target wasm32-unknown-unknown`.
 
-Then <http://127.0.0.1:8090/>: quote, mine a block, check the deposit, pay,
-claim, mine again. The maker funds the deposit on its own, so the page needs no
-wallet until the claim, which it signs itself. `--dev-pay` pays the taker's
-invoice from the taker's own node so the flow can be driven without a second
-wallet; without it the page shows an invoice for the user to pay.
+Then <http://127.0.0.1:8090/>: quote, pay the bond, mine a block, check the
+deposit, pay, claim, mine again. Nothing is funded until the bond is in, so the
+deposit does not exist yet at the moment a swap is offered. The maker funds it on
+its own, so the page needs no wallet until the claim, which it signs itself.
+`--dev-pay` pays the taker's invoice from the taker's own node so the flow can be
+driven without a second wallet; without it the page shows an invoice for the user
+to pay.
 
 Close the tab after paying and reopen it before the deposit's locktime: the page
 finds the swap, counts the blocks it has left, and claims it without being asked
 as long as it remembers a destination address. Mine up to the locktime instead
-and the warning turns into a race.
+and the warning turns into a race. Mine past the point where a payment made now
+would no longer expire in time - the invoice's CLTV delta plus the margin - and
+the page stops offering the pay button, because a maker that can refund and then
+settle takes both legs. `maker new-swap` refuses to offer such a swap at all,
+which `regtest-maker.sh` asserts along with the floor being accepted.
 
 `scripts/regtest-coordinator.sh` and `scripts/regtest-recovery.sh` run the same
 flows over HTTP, from the shell. Do not run them while these three are up: they

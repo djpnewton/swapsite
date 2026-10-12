@@ -12,6 +12,20 @@ use bitcoin::absolute::LockTime;
 /// Conservative on purpose, and a floor rather than a target.
 pub const MIN_MARGIN_BLOCKS: u32 = 12;
 
+/// Final CLTV delta the maker asks for on its hold invoice, in blocks.
+///
+/// Chosen rather than inherited from the node's default, because the on-chain
+/// refund has to outlive it: see [`LegTimelocks`].
+pub const DEFAULT_CLTV_DELTA: u32 = 40;
+
+/// Whether `initiator` outlives `counterparty` by at least `margin` blocks.
+///
+/// The same rule as [`LegTimelocks::new`], for a caller that has plain heights
+/// rather than timeout types.
+pub fn has_margin(initiator: u32, counterparty: u32, margin: u32) -> bool {
+    initiator > counterparty && initiator - counterparty >= margin
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TimelockError {
     #[error("initiator timeout {initiator} is not after counterparty timeout {counterparty}")]
@@ -76,6 +90,18 @@ impl LegTimelocks {
         })
     }
 
+    /// Same, from plain heights, which is how a swap is described before it is
+    /// built.
+    pub fn from_heights(
+        initiator: u32,
+        counterparty: u32,
+        margin: u32,
+    ) -> Result<Self, TimelockError> {
+        let to_locktime =
+            |height: u32| LockTime::from_height(height).map_err(|_| TimelockError::NonHeight);
+        Self::new(to_locktime(initiator)?, to_locktime(counterparty)?, margin)
+    }
+
     /// Same, using [`MIN_MARGIN_BLOCKS`].
     pub fn with_default_margin(
         initiator: LockTime,
@@ -117,6 +143,23 @@ mod tests {
     #[test]
     fn accepts_exactly_the_minimum_margin() {
         assert!(LegTimelocks::new(h(112), h(100), 12).is_ok());
+    }
+
+    #[test]
+    fn heights_are_checked_the_same_way_as_timeouts() {
+        assert!(LegTimelocks::from_heights(112, 100, 12).is_ok());
+        assert_eq!(
+            LegTimelocks::from_heights(111, 100, 12).unwrap_err(),
+            TimelockError::MarginTooSmall {
+                initiator: 111,
+                counterparty: 100,
+                actual: 11,
+                required: 12,
+            }
+        );
+        // The same rule without the types, for callers that only have heights.
+        assert!(has_margin(112, 100, 12));
+        assert!(!has_margin(111, 100, 12));
     }
 
     #[test]

@@ -13,6 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::params::{has_margin, MIN_MARGIN_BLOCKS};
 use crate::state::SwapState;
 
 /// A deadline this close, in blocks, counts as urgent.
@@ -30,6 +31,9 @@ pub struct TakerView {
     pub has_preimage: bool,
     /// Whether the HTLC output is still unspent, as the chain reports it.
     pub deposit_unspent: bool,
+    /// The Lightning leg's final CLTV delta: a payment made now expires at
+    /// `height + cltv_delta`, and the refund has to open after that.
+    pub cltv_delta: u32,
     /// The height at which the maker's refund path opens.
     pub deadline: u32,
     /// The height this verdict is being decided at.
@@ -45,6 +49,10 @@ pub enum TakerAction {
     /// The HTLC is funded and the preimage has not reached this page. Either
     /// the payment is still in flight or it was never made.
     WaitForPayment,
+    /// Paying now would leave the payment expiring too close to the maker's
+    /// refund opening, so a maker could refund and then settle and take both
+    /// legs. Nothing to claim yet, and nothing to pay.
+    TooLateToPay { blocks_left: u32 },
     /// The swap settled, so the preimage is public, but this page does not have
     /// it: it has to come from the wallet that paid, before the refund opens.
     FindPreimage { blocks_left: u32 },
@@ -85,6 +93,7 @@ impl Recovery {
             state,
             has_preimage,
             deposit_unspent,
+            cltv_delta,
             deadline,
             height,
         } = view;
@@ -109,9 +118,25 @@ impl Recovery {
             }
         } else {
             match state {
+                // A swap the taker might still pay into. If the refund would
+                // open before the payment expires plus a margin, paying is the
+                // one move that can lose the taker money.
+                SwapState::Created | SwapState::InitiatorFunded | SwapState::CounterpartyLocked
+                    if !has_margin(
+                        deadline,
+                        height.saturating_add(cltv_delta),
+                        MIN_MARGIN_BLOCKS,
+                    ) =>
+                {
+                    TakerAction::TooLateToPay {
+                        blocks_left: left.unwrap_or(0),
+                    }
+                }
                 SwapState::Created => TakerAction::WaitForDeposit,
                 // Settled means the payment went through and the maker has it,
                 // so the deposit is the taker's and only the secret is missing.
+                // Chasing it is still worth doing: the hashlock path has no
+                // timelock, so a claim is valid at any height.
                 SwapState::Settled => match left {
                     Some(blocks_left) => TakerAction::FindPreimage { blocks_left },
                     None => TakerAction::Racing {
@@ -127,7 +152,10 @@ impl Recovery {
                 blocks_left <= URGENT_BLOCKS
             }
             TakerAction::Racing { .. } => true,
-            TakerAction::WaitForDeposit | TakerAction::WaitForPayment | TakerAction::Gone => false,
+            TakerAction::WaitForDeposit
+            | TakerAction::WaitForPayment
+            | TakerAction::TooLateToPay { .. }
+            | TakerAction::Gone => false,
         };
 
         let actionable = matches!(
@@ -154,6 +182,7 @@ impl std::fmt::Display for TakerAction {
         let name = match self {
             TakerAction::WaitForDeposit => "wait_for_deposit",
             TakerAction::WaitForPayment => "wait_for_payment",
+            TakerAction::TooLateToPay { .. } => "too_late_to_pay",
             TakerAction::FindPreimage { .. } => "find_preimage",
             TakerAction::Claim { .. } => "claim",
             TakerAction::Racing { .. } => "racing",
@@ -176,6 +205,7 @@ mod tests {
             state,
             has_preimage,
             deposit_unspent: true,
+            cltv_delta: 40,
             deadline: DEADLINE,
             height,
         }
@@ -198,6 +228,29 @@ mod tests {
         for state in [InitiatorFunded, CounterpartyLocked] {
             assert_eq!(action(state, false, 100), TakerAction::WaitForPayment);
         }
+    }
+
+    #[test]
+    fn paying_into_a_window_that_is_too_short_is_refused() {
+        // 449 + 40 + 12 puts the payment's expiry at the deadline itself, so the
+        // maker could refund and still settle before the taker could claim.
+        for state in [Created, InitiatorFunded, CounterpartyLocked] {
+            assert_eq!(
+                action(state, false, 449),
+                TakerAction::TooLateToPay { blocks_left: 51 },
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_settled_swap_still_wants_the_preimage_when_the_window_is_short() {
+        // The payment already happened, so there is nothing to refuse: a claim
+        // is valid at any height and racing the refund is the taker's only move.
+        assert_eq!(
+            action(Settled, false, 449),
+            TakerAction::FindPreimage { blocks_left: 51 }
+        );
     }
 
     #[test]

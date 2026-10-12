@@ -393,10 +393,21 @@ impl LightningNode for LnCli {
         preimage: &Preimage,
         amount_sat: u64,
         memo: &str,
+        cltv_delta: u32,
     ) -> Result<Invoice, LightningError> {
         let hash = preimage.payment_hash().to_hex();
         let amount = amount_sat.to_string();
-        let output = self.run(&["addholdinvoice", &hash, "--amt", &amount, "--memo", memo])?;
+        let cltv = cltv_delta.to_string();
+        let output = self.run(&[
+            "addholdinvoice",
+            &hash,
+            "--amt",
+            &amount,
+            "--memo",
+            memo,
+            "--cltv_expiry_delta",
+            &cltv,
+        ])?;
 
         let mut invoice = Invoice::from_lnd(&output)?;
         // The command does not echo the amount back, but we know what we asked for.

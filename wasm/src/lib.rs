@@ -117,6 +117,9 @@ enum Request {
         /// other way tells a taker to give up on a swap that is still theirs.
         #[serde(default = "default_true")]
         deposit_unspent: bool,
+        /// The swap's final CLTV delta, in blocks. Required: an absent one would
+        /// have to be guessed in the unsafe direction.
+        cltv_delta: u32,
         deadline: u32,
         height: u32,
     },
@@ -232,6 +235,7 @@ fn dispatch_request(input: &str) -> Result<Value, String> {
             state,
             has_preimage,
             deposit_unspent,
+            cltv_delta,
             deadline,
             height,
         } => {
@@ -239,6 +243,7 @@ fn dispatch_request(input: &str) -> Result<Value, String> {
                 state: parse_state(&state)?,
                 has_preimage,
                 deposit_unspent,
+                cltv_delta,
                 deadline,
                 height,
             };
@@ -556,6 +561,7 @@ mod tests {
             "op": "assess",
             "state": "settled",
             "has_preimage": true,
+            "cltv_delta": 40,
             "deadline": 506,
             "height": 500,
         }));
@@ -575,6 +581,7 @@ mod tests {
             "op": "assess",
             "state": "settled",
             "has_preimage": false,
+            "cltv_delta": 40,
             "deadline": 506,
             "height": 400,
         }));
@@ -590,6 +597,7 @@ mod tests {
             "op": "assess",
             "state": "settled",
             "has_preimage": true,
+            "cltv_delta": 40,
             "deadline": 506,
             "height": 510,
         }));
@@ -608,6 +616,7 @@ mod tests {
             "state": "settled",
             "has_preimage": true,
             "deposit_unspent": false,
+            "cltv_delta": 40,
             "deadline": 506,
             "height": 480,
         }));
@@ -624,6 +633,7 @@ mod tests {
             "op": "assess",
             "state": "settled",
             "has_preimage": true,
+            "cltv_delta": 40,
             "deadline": 506,
             "height": 480,
         }));
@@ -640,6 +650,7 @@ mod tests {
             "op": "assess",
             "state": "settled",
             "has_preimage": true,
+            "cltv_delta": 40,
             "deadline": 506,
             "height": 480,
         }));
@@ -656,6 +667,7 @@ mod tests {
             "op": "assess",
             "state": "initiator_funded",
             "has_preimage": false,
+            "cltv_delta": 40,
             "deadline": 506,
             "height": 400,
         }));
@@ -671,6 +683,7 @@ mod tests {
                 "op": "assess",
                 "state": "wandering",
                 "has_preimage": true,
+                "cltv_delta": 40,
                 "deadline": 506,
                 "height": 500,
             })

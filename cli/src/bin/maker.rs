@@ -27,10 +27,25 @@ use swapsite_core::{
     htlc::Htlc,
     lightning::{InvoiceState, LightningNode},
     maker::{plan, reconcile, Action, Funding, Observed, PublicSwap, SwapRecord},
+    params::{LegTimelocks, DEFAULT_CLTV_DELTA, MIN_MARGIN_BLOCKS},
     state::{Event, SwapState},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// Blocks a taker has left to pay in at the latest moment the maker may fund
+/// (the bond's deadline), which is when its window is smallest.
+///
+/// A longer window costs the maker capital, and only on a swap that is
+/// abandoned, which is what the bond is for. A shorter one makes a merely slow
+/// taker's payment unsafe.
+const PAYMENT_WINDOW_BLOCKS: u32 = 30;
+
+/// Blocks from the last funding height to the refund.
+///
+/// The invoice's CLTV delta plus the minimum margin plus the window above: any
+/// less and a payment would expire too close to the refund to be claimed.
+const DEFAULT_LOCKTIME_MARGIN: u32 = DEFAULT_CLTV_DELTA + MIN_MARGIN_BLOCKS + PAYMENT_WINDOW_BLOCKS;
 
 #[derive(Parser)]
 #[command(name = "maker", about = "Maker daemon for trustless swaps")]
@@ -59,7 +74,7 @@ enum Cmd {
         #[arg(long, default_value_t = 2_000)]
         claim_fee: u64,
         /// Blocks from now until the deposit can be refunded.
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_LOCKTIME_MARGIN)]
         locktime_margin: u32,
         /// Fee for the refund transaction, in satoshis.
         #[arg(long, default_value_t = 2_000)]
@@ -71,6 +86,12 @@ enum Cmd {
         /// Blocks the taker has to pay the bond in.
         #[arg(long, default_value_t = 30)]
         bond_window: u32,
+        /// Final CLTV delta the hold invoice asks for, in blocks.
+        ///
+        /// The on-chain refund has to outlive it, so `--locktime-margin` must be
+        /// at least this much plus the minimum margin.
+        #[arg(long, default_value_t = DEFAULT_CLTV_DELTA)]
+        cltv_delta: u32,
     },
 
     /// Run the daemon: watch every swap and act on it.
@@ -187,6 +208,7 @@ fn main() -> Result<()> {
             refund_fee,
             bond_fee,
             bond_window,
+            cltv_delta,
         } => new_swap(
             &config,
             &NewSwapRequest {
@@ -198,6 +220,7 @@ fn main() -> Result<()> {
                 refund_fee,
                 bond_fee,
                 bond_window,
+                cltv_delta,
             },
         ),
         Cmd::Run { config, once } => run(&config, once),
@@ -238,6 +261,9 @@ struct NewSwapRequest {
     /// bond cannot eat into the margin between the deposit and the refund.
     #[serde(default = "default_bond_window")]
     bond_window: u32,
+    /// Final CLTV delta the hold invoice asks for, in blocks.
+    #[serde(default = "default_cltv_delta")]
+    cltv_delta: u32,
 }
 
 fn default_claim_fee() -> u64 {
@@ -245,7 +271,7 @@ fn default_claim_fee() -> u64 {
 }
 
 fn default_locktime_margin() -> u32 {
-    30
+    DEFAULT_LOCKTIME_MARGIN
 }
 
 fn default_refund_fee() -> u64 {
@@ -258,6 +284,10 @@ fn default_bond_fee() -> u64 {
 
 fn default_bond_window() -> u32 {
     30
+}
+
+fn default_cltv_delta() -> u32 {
+    DEFAULT_CLTV_DELTA
 }
 
 /// Offer a swap: the invoices and the terms. Nothing is funded yet.
@@ -277,6 +307,19 @@ fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<SwapReco
     let bond_by = chain.height()? + request.bond_window;
     let locktime = bond_by + request.locktime_margin;
 
+    // And the refund has to outlive the payment the taker will make. If it opens
+    // first, the maker can refund the deposit and then settle the payment and
+    // take both legs, so an unusable pair of timeouts is refused here rather
+    // than offered to someone.
+    LegTimelocks::from_heights(locktime, bond_by + request.cltv_delta, MIN_MARGIN_BLOCKS).map_err(
+        |e| {
+            format!(
+                "refusing to offer this swap: the refund would open before the taker's \
+                 payment could expire ({e})"
+            )
+        },
+    )?;
+
     // A fresh refund key per swap, so one leaked record cannot expose the rest.
     let secp = Secp256k1::new();
     let mut rng = bitcoin::secp256k1::rand::thread_rng();
@@ -294,7 +337,12 @@ fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<SwapReco
 
     // Deposit enough for the taker to claim and still net what it was quoted.
     let deposit_sat = amount_sat + request.claim_fee;
-    let invoice = lightning.add_hold_invoice(&preimage, amount_sat + request.fee, "swap")?;
+    let invoice = lightning.add_hold_invoice(
+        &preimage,
+        amount_sat + request.fee,
+        "swap",
+        request.cltv_delta,
+    )?;
     // A plain invoice, not a hold one: paying it is final, which is exactly what
     // makes abandoning cost the taker. Its hash is derived, so settling it
     // reveals nothing about the on-chain leg.
@@ -316,6 +364,7 @@ fn create_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<SwapReco
         refund_secret: hex::encode(refund_key.secret_bytes()),
         refund_pubkey: refund_pubkey.to_string(),
         locktime,
+        cltv_delta: request.cltv_delta,
         htlc_address: address.to_string(),
         bolt11: invoice.bolt11,
         bond_bolt11,
@@ -379,6 +428,7 @@ fn new_swap(config: &NodeConfig, request: &NewSwapRequest) -> Result<()> {
     println!("bond_bolt11={}", record.bond_bolt11);
     println!("bond_sat={}", record.bond_sat);
     println!("bond_by={}", record.bond_by);
+    println!("cltv_delta={}", record.cltv_delta);
     println!("bolt11={}", record.bolt11);
     println!("htlc_address={}", record.htlc_address);
     println!("payment_hash={}", record.payment_hash);
@@ -633,6 +683,7 @@ fn status(config: &NodeConfig, id: Option<&str>) -> Result<()> {
         println!("bond={}", record.bond_sat);
         println!("bond_by={}", record.bond_by);
         println!("locktime={}", record.locktime);
+        println!("cltv_delta={}", record.cltv_delta);
         println!("htlc_address={}", record.htlc_address);
         println!(
             "deposit_txid={}",

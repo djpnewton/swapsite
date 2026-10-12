@@ -81,11 +81,15 @@ taker() { node web/taker-cli.mjs "$@"; }
 # come from.
 verdict() {  # state, locktime, [preimage], [outpoint]
   local state="$1" locktime="$2" preimage="${3:-}" outpoint="${4:-}" args
-  args=(--state "$state" --locktime "$locktime")
+  args=(--state "$state" --cltv-delta "$CLTV_DELTA" --locktime "$locktime")
   [ -n "$preimage" ] && args+=(--preimage "$preimage")
   [ -n "$outpoint" ] && args+=(--outpoint "$outpoint")
   taker assess "${args[@]}"
 }
+
+# The Lightning timeout the maker asks for. Replaced by the swap's own terms as
+# soon as one is created, because the verdict needs it to judge the window.
+CLTV_DELTA="${CLTV_DELTA:-40}"
 
 # Buy a swap and pay for it, leaving the deposit unclaimed. This is where a
 # taker is when the tab closes.
@@ -99,6 +103,7 @@ make_and_pay() {  # echo "id locktime preimage outpoint sats"
   hash=$(printf '%s' "$swap" | jget .payment_hash)
   locktime=$(printf '%s' "$swap" | jget .locktime)
   refund_pubkey=$(printf '%s' "$swap" | jget .refund_pubkey)
+  CLTV_DELTA=$(printf '%s' "$swap" | jget .cltv_delta)
 
   # The bond comes first: the maker funds nothing until it is in, and dev pay
   # stands in for the taker's wallet for both payments.
@@ -298,6 +303,27 @@ if taker broadcast --tx-hex "$(printf '%s\n' "$CLAIM2" | field tx_hex)" > /dev/n
   fail "a claim against a refunded deposit was accepted"
 fi
 echo "broadcast:     refused, because the output it spends is gone"
+
+# --- a window too short to pay into ---------------------------------------
+#
+# The taker's own check, and the one that does not depend on the maker having
+# configured anything correctly: a payment made now expires cltv_delta blocks
+# from here, and the refund has to open after that plus a margin.
+
+echo
+echo "== a window too short to pay into is refused =="
+NOW=$(height)
+SHORT=$(taker assess --state initiator_funded --cltv-delta 40 \
+  --locktime "$(( NOW + 51 ))" --height "$NOW")
+[ "$(field action <<< "$SHORT")" = "too_late_to_pay" ] \
+  || fail "expected too_late_to_pay, got $(field action <<< "$SHORT")"
+echo "51 blocks:     $(field action <<< "$SHORT") - a 40 block payment needs 52"
+
+ROOMY=$(taker assess --state initiator_funded --cltv-delta 40 \
+  --locktime "$(( NOW + 52 ))" --height "$NOW")
+[ "$(field action <<< "$ROOMY")" = "wait_for_payment" ] \
+  || fail "expected wait_for_payment at the floor, got $(field action <<< "$ROOMY")"
+echo "52 blocks:     $(field action <<< "$ROOMY") - the floor is enough"
 
 echo
 echo "ok: a lost page recovered its swap, and a deposit taken after payment was reported"

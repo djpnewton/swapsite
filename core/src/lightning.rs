@@ -108,11 +108,16 @@ impl Invoice {
 /// A Lightning node the swap protocol can drive.
 pub trait LightningNode {
     /// Issue an invoice that holds the payer's funds until settled.
+    ///
+    /// `cltv_delta` is the final hop's timeout in blocks. The caller chooses it
+    /// rather than accepting the node's default, because the on-chain leg has to
+    /// outlive it.
     fn add_hold_invoice(
         &self,
         preimage: &Preimage,
         amount_sat: u64,
         memo: &str,
+        cltv_delta: u32,
     ) -> Result<Invoice, LightningError>;
 
     fn invoice_state(&self, hash: &PaymentHash) -> Result<InvoiceState, LightningError>;

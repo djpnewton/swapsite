@@ -16,6 +16,7 @@ use swapsite_core::{
     hash::{PaymentHash, Preimage},
     htlc::Htlc,
     lightning::{check_joined, LightningNode},
+    params::DEFAULT_CLTV_DELTA,
     spend,
 };
 
@@ -215,6 +216,9 @@ enum LnCmd {
         amount: u64,
         #[arg(long, default_value = "swap")]
         memo: String,
+        /// Final CLTV delta for the invoice, in blocks.
+        #[arg(long, default_value_t = DEFAULT_CLTV_DELTA)]
+        cltv_delta: u32,
     },
     /// Print the state of an invoice.
     State {
@@ -387,9 +391,10 @@ fn ln(cmd: LnCmd) -> Result<()> {
             preimage,
             amount,
             memo,
+            cltv_delta,
         } => {
             let preimage = Preimage::from_hex(&preimage)?;
-            let invoice = client(&node).add_hold_invoice(&preimage, amount, &memo)?;
+            let invoice = client(&node).add_hold_invoice(&preimage, amount, &memo, cltv_delta)?;
             eprintln!("state:         {}", invoice.state);
             eprintln!("amount:        {amount} sat");
             println!("bolt11={}", invoice.bolt11);

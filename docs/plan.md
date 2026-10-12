@@ -196,6 +196,18 @@ Registry of decisions:
   profit. This is the arrangement the Lightning Engineering pages describe as a
   "non-refundable Lightning payment upfront ... to compensate for the
   opportunity cost of funds being locked up".
+- **The refund has to outlive the payment.** `LegTimelocks` refuses any swap whose
+  on-chain timeout does not clear the invoice's final CLTV delta by
+  `MIN_MARGIN_BLOCKS`, both when an offer is built and when a record is read back
+  off disk, and the maker refuses to fund a bond that arrived after the deadline
+  it will not fund past. The taker is the last line of defence, because it is the
+  one that can see the current height when it pays: it refuses a swap whose
+  remaining window is too short. Without this, a maker can refund the deposit and
+  still settle a payment made against it, taking both legs - which is what an
+  earlier version of this code did, on regtest, before the rule was enforced.
+  The maker's default margin is the CLTV delta plus the floor plus a payment
+  window, measured from the last height it will fund at, so the taker's window
+  never shrinks below that window however slow the bond is.
 - **Recovery is a verdict, not a service.** Nobody can claim for the taker, so
   what the taker gets is a judgement - drawn from its own preimage, the chain,
   and the HTLC's own locktime - of whether a move is left. The page acts on it
@@ -252,14 +264,10 @@ Registry of decisions:
 - Fee bumping: a presigned refund can become un-broadcastable if fees rise.
   Needs CPFP or anchor outputs.
 - Maker LN liquidity: HODL invoices lock maker capital for up to `T`.
-- **Timelock ordering is not enforced.** `locktime_margin` (default 30) sits
-  below the invoice's CLTV delta (80), so the maker's refund path opens before
-  the taker's Lightning payment expires - and a maker can then refund the
-  deposit and still settle the payment, taking both legs. Demonstrated on
-  regtest. `LegTimelocks` encodes the right rule and is constructed only inside
-  its own unit tests. The fix is to validate at construction with a margin floor
-  above the invoice's CLTV delta, and to have the taker refuse to pay into a
-  deposit whose remaining window is too short.
+- Bond asymmetry: the bond is non-refundable, so a maker that collects one and
+  then never funds costs the taker the bond. Reputation and pricing the bond at
+  cost are the current answer; a bond that the taker can reclaim if no deposit
+  appears would remove the asymmetry entirely.
 - Coordinator trust for status: the coordinator must learn of claims from chain
   observation, not from a counterparty's word.
 - Reorg handling differs per chain and per direction.

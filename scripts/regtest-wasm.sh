@@ -18,9 +18,10 @@ mkdir -p "$SWAPS"
 
 RELAY_PID=""
 cleanup() {
-  [ -n "$RELAY_PID" ] && kill "$RELAY_PID" 2>/dev/null
-  pkill -f "maker run --dir $SWAPS" 2>/dev/null
-  return 0
+  # Allowed to find nothing: a non-zero kill or pkill under `set -e` would take
+  # the exit status with it.
+  [ -n "$RELAY_PID" ] && kill "$RELAY_PID" 2>/dev/null || true
+  pkill -f "maker run --dir $SWAPS" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -56,7 +57,7 @@ echo "pubkey:        ${TAKER_PUBKEY:0:24}..."
 echo
 echo "== maker creates the swap =="
 NEW=$(maker new-swap --dir "$SWAPS" --amount "$AMOUNT" \
-  --claim-pubkey "$TAKER_PUBKEY" --locktime-margin 30 2>/dev/null)
+  --claim-pubkey "$TAKER_PUBKEY" 2>/dev/null)
 ID=$(printf '%s\n' "$NEW" | field id)
 BOLT11=$(printf '%s\n' "$NEW" | field bolt11)
 BOND=$(printf '%s\n' "$NEW" | field bond_bolt11)

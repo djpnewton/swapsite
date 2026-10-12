@@ -108,7 +108,8 @@ try {
       // The deadline is the HTLC's own locktime, and the height comes from the
       // chain rather than from the caller, so the two cannot disagree. Same for
       // the deposit: the taker asks the relay whether it is still there instead
-      // of taking anyone's word for it.
+      // of taking anyone's word for it. The CLTV delta is the swap's own term and
+      // has to be passed in.
       const preimage = flags.preimage;
       let deposit_unspent = true;
       if (flags.outpoint) {
@@ -119,6 +120,7 @@ try {
         state: need(flags, "state"),
         has_preimage: preimage !== undefined && preimage !== "",
         deposit_unspent,
+        cltv_delta: Number(need(flags, "cltv-delta")),
         deadline: Number(need(flags, "locktime")),
         height: Number(flags.height ?? (await chain.height())),
       });
