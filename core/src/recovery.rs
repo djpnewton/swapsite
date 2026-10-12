@@ -51,8 +51,12 @@ pub enum TakerAction {
     WaitForPayment,
     /// Paying now would leave the payment expiring too close to the maker's
     /// refund opening, so a maker could refund and then settle and take both
-    /// legs. Nothing to claim yet, and nothing to pay.
+    /// legs. There is still time to pay, just not enough of it.
     TooLateToPay { blocks_left: u32 },
+    /// The refund path is open and nothing was paid, so the window has closed
+    /// for good: a payment made now could not expire before the maker is able
+    /// to take the deposit back. Nothing to pay, and nothing to claim.
+    Expired,
     /// The swap settled, so the preimage is public, but this page does not have
     /// it: it has to come from the wallet that paid, before the refund opens.
     FindPreimage { blocks_left: u32 },
@@ -128,8 +132,11 @@ impl Recovery {
                         MIN_MARGIN_BLOCKS,
                     ) =>
                 {
-                    TakerAction::TooLateToPay {
-                        blocks_left: left.unwrap_or(0),
+                    // Either there is still a window, just too short to pay
+                    // into, or it has closed and there is nothing left to pay.
+                    match left {
+                        Some(blocks_left) => TakerAction::TooLateToPay { blocks_left },
+                        None => TakerAction::Expired,
                     }
                 }
                 SwapState::Created => TakerAction::WaitForDeposit,
@@ -155,6 +162,7 @@ impl Recovery {
             TakerAction::WaitForDeposit
             | TakerAction::WaitForPayment
             | TakerAction::TooLateToPay { .. }
+            | TakerAction::Expired
             | TakerAction::Gone => false,
         };
 
@@ -183,6 +191,7 @@ impl std::fmt::Display for TakerAction {
             TakerAction::WaitForDeposit => "wait_for_deposit",
             TakerAction::WaitForPayment => "wait_for_payment",
             TakerAction::TooLateToPay { .. } => "too_late_to_pay",
+            TakerAction::Expired => "expired",
             TakerAction::FindPreimage { .. } => "find_preimage",
             TakerAction::Claim { .. } => "claim",
             TakerAction::Racing { .. } => "racing",
@@ -240,6 +249,28 @@ mod tests {
                 TakerAction::TooLateToPay { blocks_left: 51 },
                 "{state:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_window_that_has_closed_is_expired_rather_than_short() {
+        // The last height a payment can still be made from, then the one where
+        // the refund path is open and no payment can expire in time. They are
+        // different things: one is a countdown, the other is over.
+        for state in [Created, InitiatorFunded, CounterpartyLocked] {
+            assert_eq!(
+                action(state, false, 499),
+                TakerAction::TooLateToPay { blocks_left: 1 },
+                "{state:?}"
+            );
+        }
+
+        for state in [Created, InitiatorFunded, CounterpartyLocked] {
+            let recovery = Recovery::assess(view(state, false, DEADLINE));
+            assert_eq!(recovery.action, TakerAction::Expired, "{state:?}");
+            // Nothing to pay and nothing to claim, so nothing to nag about.
+            assert!(!recovery.urgent);
+            assert!(!recovery.actionable);
         }
     }
 

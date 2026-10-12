@@ -319,6 +319,13 @@ SHORT=$(taker assess --state initiator_funded --cltv-delta 40 \
   || fail "expected too_late_to_pay, got $(field action <<< "$SHORT")"
 echo "51 blocks:     $(field action <<< "$SHORT") - a 40 block payment needs 52"
 
+# The same window once it has closed: nothing to count down to any more.
+CLOSED=$(taker assess --state initiator_funded --cltv-delta 40 \
+  --locktime "$NOW" --height "$NOW")
+[ "$(field action <<< "$CLOSED")" = "expired" ] \
+  || fail "expected expired, got $(field action <<< "$CLOSED")"
+echo "0 blocks:      $(field action <<< "$CLOSED") - the refund path is open"
+
 ROOMY=$(taker assess --state initiator_funded --cltv-delta 40 \
   --locktime "$(( NOW + 52 ))" --height "$NOW")
 [ "$(field action <<< "$ROOMY")" = "wait_for_payment" ] \

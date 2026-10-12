@@ -262,7 +262,13 @@ async function pay(id) {
     if (bonded) {
       // Both of these are the taker's own protection, and neither is something
       // the maker can be trusted to have done.
-      if (verdict(id)?.action.kind === "too_late_to_pay") {
+      const kind = verdict(id)?.action.kind;
+      if (kind === "expired") {
+        throw new Error(
+          "this swap expired: the maker may refund the deposit now, so paying it could leave your money with nothing to claim",
+        );
+      }
+      if (kind === "too_late_to_pay") {
         throw new Error(
           "the maker's refund would open before a payment made now expires - do not pay into this swap",
         );
@@ -347,9 +353,12 @@ async function claim(id, options = {}) {
 
 // --- rendering -------------------------------------------------------------
 
-function badge(swap) {
+function badge(swap, recovery) {
   if (swap.state === "settled") return `<span class="badge good">settled</span>`;
   if (swap.state === "refunded") return `<span class="badge bad">refunded</span>`;
+  // A closed payment window is not a maker state, but it is the one thing the
+  // taker needs to see: a funded swap that can no longer be paid into is over.
+  if (recovery?.action.kind === "expired") return `<span class="badge bad">expired</span>`;
   return `<span class="badge">${swap.state.replace(/_/g, " ")}</span>`;
 }
 
@@ -390,11 +399,21 @@ function card(id, entry) {
   // invite a transaction that is guaranteed to be rejected.
   const gone = recovery?.action.kind === "gone";
 
+  // Either window leaves nothing to pay: one is too short to pay into safely,
+  // the other has closed and paying early enough is no longer possible.
+  const unpayable = ["too_late_to_pay", "expired"].includes(recovery?.action.kind);
+
+  // Paying cannot help a swap whose deposit is spent either, so that is the one
+  // question the rest of the card asks: the buttons and the invoices all appear
+  // only while paying is still a move worth making.
+  const payable = !gone && !unpayable;
+
   // The bond comes first and is not returned: it is what makes abandoning a
   // swap cost the taker rather than the maker.
-  const bond = bonded
-    ? ""
-    : `<p class="quote">Pay the bond first, before height ${swap.bond_by}. The
+  const bond =
+    bonded || !payable
+      ? ""
+      : `<p class="quote">Pay the bond first, before height ${swap.bond_by}. The
        maker funds nothing until it is in, and it is not returned: it covers its
        on-chain fees either way.</p>
        <pre class="bolt11">${swap.bond_bolt11}</pre>`;
@@ -402,14 +421,13 @@ function card(id, entry) {
   // The invoice, shown whether or not this page can pay it. Paying from another
   // wallet is the real flow; the dev shortcut is only a shortcut.
   const invoice =
-    bonded && !preimage && swap.bolt11
+    bonded && !preimage && swap.bolt11 && payable
       ? `<p class="quote">Pay this invoice, from any wallet on this network:</p>
          <pre class="bolt11">${swap.bolt11}</pre>`
       : "";
 
   const actions = [];
-  const tooLate = recovery?.action.kind === "too_late_to_pay";
-  if (!gone && !tooLate) {
+  if (payable) {
     if (!bonded) {
       // No deposit yet, so no check and no swap to pay for - only the bond.
       actions.push(
@@ -457,7 +475,7 @@ function card(id, entry) {
     <article class="swap">
       <div class="swap-head">
         <span class="swap-id">${short(id, 12, 6)}</span>
-        ${badge(swap)}
+        ${badge(swap, recovery)}
       </div>
       <dl>${rows.join("")}</dl>
       <div class="actions">${actions.join("")}</div>
@@ -492,6 +510,8 @@ function notice(recovery) {
       return `<p class="error${urgent ? " urgent" : ""}">Your payment settled, so the preimage is public - the maker publishes it when it settles and this clears by itself. If the maker cannot be reached, paste it from the wallet that paid, before height ${deadline}.</p>`;
     case "too_late_to_pay":
       return `<p class="error">Only ${action.blocks_left} blocks until the maker may refund, and a payment made now would not expire before that. Paying into this swap could leave your payment settled with the deposit already refunded, so do not.</p>`;
+    case "expired":
+      return `<p class="error">This swap expired: the refund path is open, so the maker can withdraw the deposit at any moment, and a payment made now would not expire before that. Do not pay into it.</p>`;
     case "gone":
       return `<p class="error">This deposit has been spent, so there is no longer anything to claim. If you claimed it yourself, your coins are at the address you named. If you did not, the maker refunded it and the payment you made went with it.</p>`;
     default:
