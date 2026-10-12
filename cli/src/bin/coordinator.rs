@@ -218,6 +218,15 @@ impl Service {
         if let Some(captures) = request.matches("POST", "/dev/pay/:id") {
             return self.pay(&captures[0]);
         }
+        if request.matches("POST", "/btc2ln/offer").is_some() {
+            return self.forward("POST", "/btc2ln/offer", &request.body);
+        }
+        if request.matches("POST", "/btc2ln/funded").is_some() {
+            return self.forward("POST", "/btc2ln/funded", &request.body);
+        }
+        if request.matches("GET", "/btc2ln/swaps").is_some() {
+            return self.forward("GET", "/btc2ln/swaps", "");
+        }
 
         self.file(&request.path)
     }
@@ -368,6 +377,25 @@ impl Service {
         match lightning.pay(&swap.bolt11) {
             Ok(preimage) => Response::json(200, &json!({ "preimage": preimage.to_hex() })),
             Err(e) => Response::error(502, e.to_string()),
+        }
+    }
+
+    /// Pass a request to the maker's control plane and hand its answer back.
+    ///
+    /// The page is served from one origin, so it cannot reach the maker for
+    /// itself. Nothing is interpreted on the way through: the maker's status
+    /// and body are what the page sees, so a refusal reads the same either way.
+    fn forward(&self, method: &str, path: &str, body: &str) -> Response {
+        let url = format!("{}{path}", self.maker_url);
+        let payload = (method != "GET").then_some(body);
+
+        match fetch(method, &url, payload) {
+            Ok(response) => Response::bytes(
+                response.status,
+                "application/json",
+                response.body.into_bytes(),
+            ),
+            Err(e) => Response::error(502, format!("could not reach the maker: {e}")),
         }
     }
 

@@ -285,12 +285,20 @@ fn main() -> Result<()> {
             locktime,
             fee,
             claim_fee,
-        } => btc2ln_offer(&config, &invoice, &refund_pubkey, locktime, fee, claim_fee),
+        } => {
+            let record = btc2ln_offer(&config, &invoice, &refund_pubkey, locktime, fee, claim_fee)?;
+            print_btc2ln_offer(&record, config.network()?)
+        }
         Cmd::Btc2lnFunded {
             config,
             id,
             outpoint,
-        } => btc2ln_funded(&config, &id, &outpoint),
+        } => {
+            let sats = btc2ln_funded(&config, &id, &outpoint)?;
+            println!("deposit={outpoint}");
+            println!("sats={sats}");
+            Ok(())
+        }
         Cmd::Btc2lnRun { config, once } => btc2ln_run(&config, once),
         Cmd::Btc2lnStatus { config, id } => btc2ln_status(&config, id.as_deref()),
     }
@@ -308,7 +316,7 @@ fn btc2ln_offer(
     locktime: u32,
     fee: u64,
     claim_fee: u64,
-) -> Result<()> {
+) -> Result<Btc2lnRecord> {
     let chain = config.chain()?;
     let lightning = config.lightning()?;
     let store = config.btc2ln_store()?;
@@ -348,12 +356,17 @@ fn btc2ln_offer(
     };
     // Built once here, so a key or a locktime the HTLC will not accept is
     // refused now rather than after a taker has moved money.
-    let address = record.address(config.network()?)?;
+    record.address(config.network()?)?;
 
     // Saved before it is offered, for the same reason the other direction saves
     // before it funds: a deposit nobody wrote down is one nobody claims.
     store.save(&record)?;
 
+    Ok(record)
+}
+
+/// Print an offer the way the scripts read it: one `key=value` line each.
+fn print_btc2ln_offer(record: &Btc2lnRecord, network: Network) -> Result<()> {
     eprintln!(
         "btc2ln swap offered: {} sat on chain for {} over Lightning",
         record.deposit_sat, record.receive_sat
@@ -361,7 +374,7 @@ fn btc2ln_offer(
     println!("id={}", record.id);
     println!("invoice={}", record.invoice);
     println!("deposit_sat={}", record.deposit_sat);
-    println!("htlc_address={}", address);
+    println!("htlc_address={}", record.address(network)?);
     println!("claim_pubkey={}", record.claim_pubkey()?);
     println!("locktime={}", record.locktime);
     println!("cltv_delta={}", record.cltv_delta);
@@ -374,7 +387,7 @@ fn btc2ln_offer(
 /// The maker is told the outpoint rather than looking for it: finding an output
 /// by address would need an index. Nothing is taken on trust here, since the
 /// transaction is fetched and its script and amount are checked.
-fn btc2ln_funded(config: &NodeConfig, id: &str, outpoint: &str) -> Result<()> {
+fn btc2ln_funded(config: &NodeConfig, id: &str, outpoint: &str) -> Result<u64> {
     let chain = config.chain()?;
     let store = config.btc2ln_store()?;
     let mut record = store.load(id)?;
@@ -407,9 +420,7 @@ fn btc2ln_funded(config: &NodeConfig, id: &str, outpoint: &str) -> Result<()> {
 
     record.deposit = Some(outpoint);
     store.save(&record)?;
-    println!("deposit={outpoint}");
-    println!("sats={}", output.value.to_sat());
-    Ok(())
+    Ok(output.value.to_sat())
 }
 
 /// The btc2ln half of the daemon loop.
@@ -810,6 +821,18 @@ impl Api {
         if let Some(captures) = request.matches("GET", "/swaps/:id") {
             return self.show(&captures[0]);
         }
+        if request.matches("POST", "/btc2ln/offer").is_some() {
+            return self.btc2ln_offer(request);
+        }
+        if request.matches("POST", "/btc2ln/funded").is_some() {
+            return self.btc2ln_funded(request);
+        }
+        if request.matches("GET", "/btc2ln/swaps").is_some() {
+            return self.btc2ln_list();
+        }
+        if request.matches("POST", "/btc2ln/sweep").is_some() {
+            return self.btc2ln_sweep();
+        }
         Response::not_found()
     }
 
@@ -853,6 +876,106 @@ impl Api {
             Err(e) => Response::error(400, e.to_string()),
         }
     }
+
+    /// Offer a btc2ln swap: the taker deposits first, the maker pays second.
+    fn btc2ln_offer(&self, request: &Request) -> Response {
+        #[derive(serde::Deserialize)]
+        struct Offer {
+            invoice: String,
+            refund_pubkey: String,
+            locktime: u32,
+            #[serde(default)]
+            fee: u64,
+            #[serde(default = "default_claim_fee")]
+            claim_fee: u64,
+        }
+
+        let params: Offer = match serde_json::from_str(&request.body) {
+            Ok(params) => params,
+            Err(e) => return Response::error(400, format!("bad request: {e}")),
+        };
+
+        let offered = btc2ln_offer(
+            &self.config,
+            &params.invoice,
+            &params.refund_pubkey,
+            params.locktime,
+            params.fee,
+            params.claim_fee,
+        )
+        .and_then(|record| btc2ln_offer_json(&record, self.config.network()?));
+
+        match offered {
+            Ok(offer) => Response::json(201, &offer),
+            Err(e) => Response::error(400, e.to_string()),
+        }
+    }
+
+    /// Record the deposit a taker reports, once it has been checked.
+    fn btc2ln_funded(&self, request: &Request) -> Response {
+        #[derive(serde::Deserialize)]
+        struct Funded {
+            id: String,
+            outpoint: String,
+        }
+
+        let params: Funded = match serde_json::from_str(&request.body) {
+            Ok(params) => params,
+            Err(e) => return Response::error(400, format!("bad request: {e}")),
+        };
+
+        match btc2ln_funded(&self.config, &params.id, &params.outpoint) {
+            Ok(sats) => Response::json(200, &json!({ "deposit": params.outpoint, "sats": sats })),
+            Err(e) => Response::error(400, e.to_string()),
+        }
+    }
+
+    /// Every btc2ln swap on disk.
+    fn btc2ln_list(&self) -> Response {
+        let swaps = (|| -> Result<Vec<serde_json::Value>> {
+            let store = self.config.btc2ln_store()?;
+            let network = self.config.network()?;
+            let mut swaps = Vec::new();
+            for id in store.ids()? {
+                swaps.push(btc2ln_offer_json(&store.load(&id)?, network)?);
+            }
+            Ok(swaps)
+        })();
+
+        match swaps {
+            Ok(swaps) => Response::json(200, &json!({ "swaps": swaps })),
+            Err(e) => Response::error(500, e.to_string()),
+        }
+    }
+
+    /// One sweep, so a page can push a swap along instead of waiting for a tick.
+    fn btc2ln_sweep(&self) -> Response {
+        match btc2ln_sweep(&self.config) {
+            Ok(()) => Response::json(200, &json!({ "swept": true })),
+            Err(e) => Response::error(500, e.to_string()),
+        }
+    }
+}
+
+/// Everything a taker needs to fund a btc2ln deposit, and to check it.
+fn btc2ln_offer_json(record: &Btc2lnRecord, network: Network) -> Result<serde_json::Value> {
+    Ok(json!({
+        "id": record.id,
+        "invoice": record.invoice,
+        "receive_sat": record.receive_sat,
+        "deposit_sat": record.deposit_sat,
+        "fee_sat": record.fee_sat,
+        "claim_fee_sat": record.claim_fee_sat,
+        "htlc_address": record.address(network)?.to_string(),
+        "claim_pubkey": record.claim_pubkey()?.to_string(),
+        "refund_pubkey": record.refund_pubkey,
+        "locktime": record.locktime,
+        "cltv_delta": record.cltv_delta,
+        "expires_at": record.expires_at,
+        "deposit": record.deposit.map(|outpoint| outpoint.to_string()),
+        "preimage": record.preimage,
+        "claim_txid": record.claim_txid,
+    }))
 }
 
 /// One pass over every swap. Everything that changes does so in here.

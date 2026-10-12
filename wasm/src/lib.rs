@@ -42,6 +42,14 @@ enum Request {
         entropy: String,
     },
 
+    /// Read a bolt11 invoice: the hash and the CLTV delta the taker has to
+    /// build the deposit against.
+    ///
+    /// Nothing here is checked by anything else. A hash the taker took from a
+    /// server would let the maker build the deposit against a hash the invoice
+    /// does not settle, and then claim it without ever paying.
+    Bolt11 { invoice: String },
+
     /// The P2WSH address of an HTLC, so the taker can check the maker's deposit.
     HtlcAddress {
         payment_hash: String,
@@ -163,6 +171,16 @@ fn dispatch_request(input: &str) -> Result<Value, String> {
             Ok(json!({
                 "secret": hex::encode(secret.secret_bytes()),
                 "pubkey": PublicKey::new(secret.public_key(&secp)).to_string(),
+            }))
+        }
+
+        Request::Bolt11 { invoice } => {
+            let decoded = swapsite_core::bolt11::decode(&invoice).map_err(|e| e.to_string())?;
+            Ok(json!({
+                "network": decoded.network.to_string(),
+                "amount_sat": decoded.amount_sat,
+                "payment_hash": decoded.payment_hash.to_hex(),
+                "min_final_cltv_expiry": decoded.min_final_cltv_expiry,
             }))
         }
 
@@ -456,6 +474,18 @@ mod tests {
         let value: Value = serde_json::from_str(&response).expect("response is JSON");
         assert!(value.get("error").is_none(), "unexpected error: {response}");
         value
+    }
+
+    /// The op name the page sends, and that an invoice it cannot read comes
+    /// back as an error rather than as a hash. The reading itself is core's to
+    /// test, against a real invoice.
+    #[test]
+    fn an_invoice_it_cannot_read_is_an_error() {
+        let response =
+            handle(&json!({ "op": "bolt11", "invoice": "lnbcrt10u1broken" }).to_string());
+        let value: Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_some(), "{response}");
     }
 
     fn keypair() -> (String, String) {

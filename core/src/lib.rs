@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bolt11;
 pub mod chain;
 pub mod hash;
 pub mod htlc;

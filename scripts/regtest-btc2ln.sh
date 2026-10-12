@@ -149,4 +149,68 @@ mine 1
   || fail "the refused deposit is still unspent after the refund"
 echo "refund:  the deposit is back in the taker's wallet"
 
-echo "ok: btc2ln swap funded, paid, claimed, and an unsafe one refused"
+echo "== the routes a page calls answer with the fields it reads =="
+# A second maker, on a scratch store and a spare port, driven the way a browser
+# would drive it: the page cannot reach a maker's CLI, only these routes.
+API="$WORK/btc2ln-api"
+rm -rf "$API"
+"$BIN/maker" ln2btc-serve --dir "$API" --listen 127.0.0.1:3222 > "$WORK/api.log" 2>&1 &
+API_PID=$!
+trap 'kill $API_PID 2>/dev/null || true' EXIT
+sleep 1
+
+read -r _ API_HASH API_BOLT <<< "$(taker_terms "$SATS")"
+API_REFUND=$(swapx keygen | field pubkey)
+API_LOCKTIME=$(( $(height) + 200 ))
+API_DEPOSIT=$(( SATS + FEE + CLAIM_FEE ))
+OFFER=$(curl -s -X POST 127.0.0.1:3222/btc2ln/offer -d "{\"invoice\":\"$API_BOLT\",\"refund_pubkey\":\"$API_REFUND\",\"locktime\":$API_LOCKTIME,\"fee\":$FEE,\"claim_fee\":$CLAIM_FEE}")
+
+# Every name the page reads, checked by name: a rename here is a page that
+# breaks, and nothing else in this script would notice.
+python3 - "$OFFER" "$API_HASH" "$API_REFUND" "$API_DEPOSIT" <<'PY' || fail "the offer the page gets is not the offer it reads"
+import json, sys
+offer = json.loads(sys.argv[1])
+hash_, refund, deposit = sys.argv[2], sys.argv[3], int(sys.argv[4])
+for name in ("id", "deposit_sat", "htlc_address", "claim_pubkey", "refund_pubkey",
+             "locktime", "cltv_delta", "expires_at"):
+    assert name in offer, f"missing {name}"
+assert offer["id"] == hash_, "the offer is for another hash"
+assert offer["refund_pubkey"].lower() == refund.lower(), "the refund key is not ours"
+assert offer["deposit_sat"] == deposit, f"{offer['deposit_sat']} != {deposit}"
+PY
+
+API_ADDRESS=$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["htlc_address"])' "$OFFER")
+API_CLAIM=$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["claim_pubkey"])' "$OFFER")
+REBUILT=$(swapx htlc-address --payment-hash "$API_HASH" --claim-pubkey "$API_CLAIM" \
+  --refund-pubkey "$API_REFUND" --locktime "$API_LOCKTIME" 2>/dev/null | head -1)
+[ "$REBUILT" = "$API_ADDRESS" ] \
+  || fail "the address the route offers is not the terms it states"
+echo "offer:   the page can rebuild the address it is given"
+
+# A deposit that pays nothing must not be recorded, or a taker could lie its
+# way to a swap the maker then pays for.
+curl -s -X POST 127.0.0.1:3222/btc2ln/funded \
+  -d "{\"id\":\"$API_HASH\",\"outpoint\":\"$(printf '00%.0s' $(seq 32)):0\"}" \
+  | grep -q '"error"' || fail "a deposit that pays nothing was recorded"
+
+read -r API_TXID API_VOUT _ <<< "$(fund_htlc "$API_ADDRESS" "$API_DEPOSIT")"
+curl -s -X POST 127.0.0.1:3222/btc2ln/funded \
+  -d "{\"id\":\"$API_HASH\",\"outpoint\":\"$API_TXID:$API_VOUT\"}" \
+  | python3 -c "import json,sys;assert json.load(sys.stdin)['sats'] == $API_DEPOSIT" \
+  || fail "the route did not record the deposit"
+
+mine 1
+curl -s -X POST 127.0.0.1:3222/btc2ln/sweep > /dev/null
+curl -s -X POST 127.0.0.1:3222/btc2ln/sweep > /dev/null
+STATE=$(swapx ln state --node taker --payment-hash "$API_HASH" | field state)
+[ "$STATE" = "SETTLED" ] || fail "the maker never paid through the routes: $STATE"
+curl -s 127.0.0.1:3222/btc2ln/swaps | python3 -c '
+import json, sys
+swap = json.load(sys.stdin)["swaps"][0]
+for name in ("preimage", "claim_txid"):
+    assert swap[name], f"the listing has no {name}"
+' || fail "the listing does not show the swap as claimed"
+echo "routes:  funded, paid and claimed through the control plane"
+
+echo "ok: btc2ln swap funded, paid, claimed, an unsafe one refused, and the"
+echo "    routes a page calls answer with the fields it reads"

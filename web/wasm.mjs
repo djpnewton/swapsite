@@ -61,6 +61,8 @@ export function takerFrom(instance) {
     call,
     /** A fresh keypair. The secret is generated where this runs, and stays there. */
     keypair: () => call({ op: "keypair", entropy: entropy() }),
+    /** What an invoice asks for: the hash and CLTV the deposit commits to. */
+    bolt11: (invoice) => call({ op: "bolt11", invoice }),
     htlcAddress: (params) => call({ op: "htlc_address", ...params }),
     findOutput: (params) => call({ op: "find_output", ...params }),
     checkJoin: (params) => call({ op: "check_join", ...params }),
