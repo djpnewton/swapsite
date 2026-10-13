@@ -87,10 +87,25 @@ reports its outpoint, then `btc2ln-run --once` to pay and claim (or as a daemon)
 ./scripts/regtest-btc2ln.sh
 ```
 
-All eight scripts source `scripts/lib.sh`, which builds the binaries once and
+To run the page itself in a browser, which is the only test that reads the DOM:
+the two payment blocks, the list's tabs, reporting a deposit by transaction id,
+and taking that deposit back once the locktime has passed. It drives headless
+chrome over the devtools protocol, and its maker is left unticking so the
+deposit it takes is never paid for:
+
+```bash
+./scripts/regtest-ui.sh
+```
+
+Pass `--show` to run the browser on screen instead of headless, which is how to
+watch a failing run rather than read its output.
+
+All nine scripts source `scripts/lib.sh`, which builds the binaries once and
 needs `cargo`, `python3` and a running compose stack; `regtest-wasm.sh`,
-`regtest-coordinator.sh` and `regtest-recovery.sh` also need `node` and the
-`wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`).
+`regtest-coordinator.sh`, `regtest-recovery.sh` and `regtest-ui.sh` also need
+`node` and the `wasm32-unknown-unknown` target
+(`rustup target add wasm32-unknown-unknown`). `regtest-ui.sh` needs chrome as
+well, and skips itself rather than failing where there is none.
 The daemon and service scripts kill anything left over from an earlier run
 before they start.
 

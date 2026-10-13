@@ -44,6 +44,45 @@ export function checkAddress(offer, rebuilt) {
   return rebuilt;
 }
 
+/**
+ * Why the deposit cannot be taken back yet, or null when it can.
+ *
+ * A refund is this taker's own key spending the deposit once the locktime has
+ * passed, so two things have to hold: the maker has not claimed, and the coins
+ * are still there. A settled invoice is not refundable either - the taker has
+ * been paid, and the deposit belongs to whoever revealed the preimage.
+ *
+ * A relay that cannot answer is not a reason to refuse. Unknown is taken as
+ * unspent, which costs a transaction that fails rather than coins abandoned.
+ */
+export function refundProblem(offer, height, deposit = null) {
+  if (offer.claim_txid) {
+    return "the maker has already claimed this deposit";
+  }
+  if (offer.preimage) {
+    return "the invoice was paid, so the deposit is the maker's to claim";
+  }
+  if (!offer.deposit) {
+    return "no deposit was ever reported to this page, so there is nothing to take back";
+  }
+
+  if (height === null || height === undefined) {
+    return "the chain height is unknown, so the locktime cannot be judged";
+  }
+
+  const locktime = Number(offer.locktime);
+  if (Number(height) < locktime) {
+    const left = locktime - Number(height);
+    return `the refund opens at height ${locktime}, ${left} block${left === 1 ? "" : "s"} away`;
+  }
+
+  if (deposit && !deposit.unspent) {
+    return "the deposit has already been spent";
+  }
+
+  return null;
+}
+
 /** The last height a deposit can still be paid for, by the maker's own rule. */
 export function lastFundingHeight(offer) {
   return Number(offer.locktime) - MIN_MARGIN_BLOCKS - Number(offer.cltv_delta);

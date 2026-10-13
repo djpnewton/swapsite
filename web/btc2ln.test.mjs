@@ -6,6 +6,7 @@ import {
   checkOffer,
   lastFundingHeight,
   MIN_MARGIN_BLOCKS,
+  refundProblem,
   verdict,
 } from "./btc2ln.mjs";
 
@@ -98,4 +99,52 @@ test("an offer whose locktime passed is expired", () => {
 
 test("an invoice that expired is named as such", () => {
   assert.equal(verdict(offer(), 4_000, 1_791_920_731).state, "invoice_expired");
+});
+
+/** The deposit the maker reported, as the page learns it. */
+const DEPOSIT = `${"ab".repeat(32)}:0`;
+const FUNDED = offer({ deposit: DEPOSIT });
+const UNSPENT = { unspent: true, sats: 22_000 };
+
+test("a funded deposit can be taken back once the locktime has passed", () => {
+  assert.equal(refundProblem(FUNDED, 4_200, UNSPENT), null, "on the height itself");
+  assert.equal(refundProblem(FUNDED, 4_900, UNSPENT), null, "and long after");
+
+  // A relay that cannot answer must not cost the taker its own money: the
+  // transaction is built, and fails at the node if the deposit was really gone.
+  assert.equal(refundProblem(FUNDED, 4_200, null), null);
+});
+
+test("a deposit is not refundable before the locktime", () => {
+  assert.match(refundProblem(FUNDED, 4_199, UNSPENT), /opens at height 4200, 1 block away/);
+  assert.match(refundProblem(FUNDED, 3_000, UNSPENT), /opens at height 4200, 1200 blocks away/);
+});
+
+test("a deposit the maker claimed is not refundable", () => {
+  const claimed = offer({ deposit: DEPOSIT, claim_txid: "ef".repeat(32) });
+  assert.match(refundProblem(claimed, 9_999, UNSPENT), /already claimed/);
+});
+
+test("a swap the maker paid for is not refundable", () => {
+  const paid = offer({ deposit: DEPOSIT, preimage: "cd".repeat(32) });
+  assert.match(refundProblem(paid, 9_999, UNSPENT), /maker's to claim/);
+});
+
+test("a claim decides it even when no preimage is known here", () => {
+  const claimed = offer({ deposit: DEPOSIT, claim_txid: "ef".repeat(32) });
+  assert.doesNotMatch(refundProblem(claimed, 9_999, UNSPENT), /null/);
+});
+
+test("a swap with no deposit has nothing to take back", () => {
+  assert.match(refundProblem(offer(), 9_999, null), /nothing to take back/);
+});
+
+test("a deposit that is already spent is refused", () => {
+  const spent = { unspent: false, sats: null };
+  assert.match(refundProblem(FUNDED, 9_999, spent), /already been spent/);
+});
+
+test("an unknown height is refused rather than guessed", () => {
+  assert.match(refundProblem(FUNDED, null, UNSPENT), /height is unknown/);
+  assert.match(refundProblem(FUNDED, undefined, UNSPENT), /height is unknown/);
 });

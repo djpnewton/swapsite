@@ -17,7 +17,7 @@
 // after the locktime, so a reload that forgot it would leave the money in the
 // HTLC with nothing able to take it out.
 
-import { checkAddress, checkOffer, verdict } from "./btc2ln.mjs";
+import { checkAddress, checkOffer, refundProblem, verdict } from "./btc2ln.mjs";
 import { PAGE_SIZES, newPager, paginate, pagerCommand, pagerHtml } from "./pager.mjs";
 import { bitcoinUri, payBlock } from "./pay.mjs";
 import { makeList, tabBar } from "./tabs.mjs";
@@ -32,6 +32,19 @@ const unixNow = () => Math.floor(Date.now() / 1000);
 
 /** A transaction id is 32 bytes of hex, and nothing else names a deposit. */
 const isTxid = (text) => /^[0-9a-f]{64}$/.test(text);
+
+/** The least a refund pays in fees: a transaction no node relays is no refund. */
+const MIN_REFUND_FEE = 1000;
+
+/**
+ * What a refund costs to spend, and what is left of the deposit after it.
+ *
+ * The offer's own figure for one spend of this deposit, and never less than the
+ * module's default: a maker that set it to nothing would leave a transaction no
+ * node agrees to relay.
+ */
+const refundFee = (offer) => Math.max(Number(offer.claim_fee_sat) || 0, MIN_REFUND_FEE);
+const refundNet = (offer) => Number(offer.deposit_sat) - refundFee(offer);
 
 const STORAGE = "swapsite.btc2ln";
 const session = JSON.parse(localStorage.getItem(STORAGE) ?? "{}");
@@ -141,6 +154,12 @@ async function refresh() {
 
 /** What the page should say about an offer, or null while the height is unknown. */
 function stateOf(entry) {
+  // A refund this page built outranks the maker's record, which cannot see that
+  // the refund path was taken: its copy still says the deposit is waiting.
+  if (entry?.refund) {
+    return { state: "refunded", note: "you took the deposit back after the locktime" };
+  }
+
   if (!entry?.offer || height === null) return null;
   return verdict(entry.offer, height, unixNow());
 }
@@ -152,7 +171,13 @@ function stateOf(entry) {
  * with no deposit, so there are no coins to keep an eye on. A deposit that is
  * waiting out its locktime is refund_later, and that stays on the list.
  */
-const OVER = new Set(["claimed", "expired", "invoice_expired", "too_late_to_fund"]);
+const OVER = new Set([
+  "claimed",
+  "refunded",
+  "expired",
+  "invoice_expired",
+  "too_late_to_fund",
+]);
 
 /**
  * Whether this offer is over with.
@@ -172,18 +197,45 @@ const LABELS = {
   claimed: "claimed",
   refund: "refund now",
   refund_later: "refund later",
+  refunded: "refunded",
   expired: "expired",
   invoice_expired: "invoice expired",
   too_late_to_fund: "too late to fund",
 };
 
-const GOOD = new Set(["claimed", "paid"]);
+const GOOD = new Set(["claimed", "paid", "refunded"]);
 const BAD = new Set(["refund", "refund_later", "expired", "invoice_expired", "too_late_to_fund"]);
 
 function badge(state) {
   if (!state) return `<span class="badge">…</span>`;
   const kind = GOOD.has(state.state) ? " good" : BAD.has(state.state) ? " bad" : "";
   return `<span class="badge${kind}">${LABELS[state.state] ?? state.state}</span>`;
+}
+
+/**
+ * What a taker does about a deposit the maker never paid for.
+ *
+ * The refund is unilateral - this page's own key spending the deposit after the
+ * locktime - so it needs a destination and that key, and nothing from the maker.
+ * A page that has lost the key says so rather than offering a button that cannot
+ * work: the key was made when the offer was accepted, and only here was it kept.
+ */
+function refundBlock(id, entry, offer) {
+  if (!entry.key) {
+    return `<p class="error">This page does not hold the refund key for this swap, so the deposit cannot be taken back from here.</p>`;
+  }
+
+  return (
+    `<div class="row">
+       <label for="refund-${id}">Address the deposit goes back to</label>
+       <input id="refund-${id}" data-refund="${id}" value="${
+         entry.refundAddress ?? ""
+       }" autocomplete="off" spellcheck="false" />
+     </div>
+     <button data-act="refund" data-id="${id}" class="primary">Take the ${sats(
+       refundNet(offer),
+     )} back</button>`
+  );
 }
 
 function card(id, entry) {
@@ -196,9 +248,16 @@ function card(id, entry) {
     `<dt>refund after</dt><dd>height ${offer.locktime}</dd>`,
   ];
 
-  if (offer.deposit) rows.push(`<dt>reported</dt><dd>${offer.deposit}</dd>`);
+  if (offer.deposit) {
+    rows.push(`<dt>reported</dt><dd><span class="preimage">${offer.deposit}</span></dd>`);
+  }
   if (offer.preimage) rows.push(`<dt>preimage</dt><dd class="preimage">${offer.preimage}</dd>`);
-  if (offer.claim_txid) rows.push(`<dt>claim</dt><dd>${offer.claim_txid}</dd>`);
+  if (offer.claim_txid) {
+    rows.push(`<dt>claim</dt><dd><span class="preimage">${offer.claim_txid}</span></dd>`);
+  }
+  if (entry.refund) {
+    rows.push(`<dt>refunded</dt><dd><span class="preimage">${entry.refund.txid}</span></dd>`);
+  }
 
   // Paying and reporting only matter while the deposit is missing and there is
   // still a window to send it in.
@@ -220,6 +279,10 @@ function card(id, entry) {
        <button data-act="report" data-id="${id}" class="primary">I have sent it</button>`
     : "";
 
+  // Once the locktime has passed the deposit is the taker's again, and this is
+  // the one state where the maker has no say in what happens to it.
+  const refund = state?.state === "refund" ? refundBlock(id, entry, offer) : "";
+
   return `
     <article class="swap">
       <div class="swap-head">
@@ -229,7 +292,8 @@ function card(id, entry) {
       <dl>${rows.join("")}</dl>
       ${link}
       ${report ? `<div class="actions">${report}</div>` : ""}
-      ${state ? `<p class="${state.state === "funded" ? "ok" : "quote"}">${state.note}</p>` : ""}
+      ${refund ? `<div class="actions">${refund}</div>` : ""}
+      ${state ? `<p class="${GOOD.has(state.state) ? "ok" : "quote"}">${state.note}</p>` : ""}
       ${entry.error ? `<p class="error">${entry.error}</p>` : ""}
     </article>`;
 }
@@ -293,25 +357,8 @@ async function fundedOutpoint(entry, txid) {
   return `${found.txid}:${found.vout}`;
 }
 
-$("btc2ln-swaps").addEventListener("click", async (event) => {
-  const chosen = event.target.closest("button[data-btab]");
-  if (chosen) {
-    list.choose(chosen.dataset.btab);
-    pager.page = 1; // a new tab starts at its own first page
-    return render();
-  }
-
-  const control = event.target.closest("[data-pager]");
-  if (control) {
-    const command = pagerCommand(control);
-    if (command?.move) pager.page += command.move;
-    return render();
-  }
-
-  const button = event.target.closest("button[data-act]");
-  if (!button || button.dataset.act !== "report") return;
-
-  const id = button.dataset.id;
+/** Report the transaction that funded the deposit, by transaction id alone. */
+async function report(id) {
   const entry = session.offers[id];
   const typed = (entry?.txid ?? "").trim().toLowerCase();
 
@@ -332,6 +379,72 @@ $("btc2ln-swaps").addEventListener("click", async (event) => {
 
   persist();
   await refresh();
+}
+
+/**
+ * Take the deposit back, once the maker has run out of time to pay for it.
+ *
+ * Signing here rather than asking anyone: the key is this page's, the locktime
+ * is public, and the relay only has to carry the transaction.
+ */
+async function refund(id) {
+  const entry = session.offers[id];
+  const { offer } = entry;
+  const address = (entry.refundAddress ?? "").trim();
+
+  try {
+    entry.error = null;
+    if (!address) throw new Error("enter the address the deposit should go back to");
+
+    // One relay answer serves both the check and the transaction: whether the
+    // deposit is still there, and what it is worth now.
+    const deposit = await chain.unspent(offer.deposit);
+    const problem = refundProblem(offer, height, deposit);
+    if (problem) throw new Error(problem);
+
+    const signed = taker.refund({
+      refund_key: entry.key.secret,
+      // The id is the payment hash: the maker names a swap after the HTLC it
+      // builds, and this page checked that when the offer arrived.
+      payment_hash: offer.id,
+      locktime: Number(offer.locktime),
+      claim_pubkey: offer.claim_pubkey,
+      outpoint: offer.deposit,
+      // The relay's own figure where it has one, the maker's where it does not.
+      value: Number(deposit?.sats ?? offer.deposit_sat),
+      to: address,
+      fee: refundFee(offer),
+    });
+
+    entry.refund = { txid: await chain.broadcast(signed.tx_hex), address };
+  } catch (e) {
+    entry.error = String(e.message ?? e);
+  }
+
+  persist();
+  await refresh();
+}
+
+$("btc2ln-swaps").addEventListener("click", async (event) => {
+  const chosen = event.target.closest("button[data-btab]");
+  if (chosen) {
+    list.choose(chosen.dataset.btab);
+    pager.page = 1; // a new tab starts at its own first page
+    return render();
+  }
+
+  const control = event.target.closest("[data-pager]");
+  if (control) {
+    const command = pagerCommand(control);
+    if (command?.move) pager.page += command.move;
+    return render();
+  }
+
+  const button = event.target.closest("button[data-act]");
+  if (!button) return;
+
+  if (button.dataset.act === "refund") return refund(button.dataset.id);
+  if (button.dataset.act === "report") return report(button.dataset.id);
 });
 
 // The page size is a select, so it arrives as a change rather than a click.
@@ -345,11 +458,12 @@ $("btc2ln-swaps").addEventListener("change", (event) => {
 });
 
 $("btc2ln-swaps").addEventListener("input", (event) => {
-  const id = event.target.dataset.txid;
-  if (!id) return;
+  const { txid, refund: refundId } = event.target.dataset;
+  if (!txid && !refundId) return;
 
   // Held in the session so a poll does not lose a paste in progress.
-  session.offers[id].txid = event.target.value;
+  if (txid) session.offers[txid].txid = event.target.value;
+  if (refundId) session.offers[refundId].refundAddress = event.target.value;
   persist();
 });
 

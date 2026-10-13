@@ -61,6 +61,7 @@ if [ "$regtest" = 1 ]; then
     regtest-wasm
     regtest-coordinator
     regtest-recovery
+    regtest-ui
   )
 
   for name in "${scripts[@]}"; do
