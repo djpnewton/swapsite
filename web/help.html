@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>how swaps work - swapsite</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <main class="doc">
+      <nav class="doc-nav">
+        <a href="/">start a swap</a>
+        <a href="/script.html">the bitcoin script</a>
+      </nav>
+
+      <header>
+        <h1>How the swaps work</h1>
+        <p class="lead">
+          A swap moves value between Lightning and on-chain bitcoin without
+          either side trusting the other to hand it over. Two locked legs share
+          one secret, and releasing that secret is what pays both.
+        </p>
+      </header>
+
+      <section>
+        <h2>Two legs, one secret</h2>
+        <p>
+          A swap is two transfers joined by a single 32-byte number, the
+          <strong>preimage</strong>. Its hash - the <strong>payment hash</strong>
+          - is written into both legs before anything moves:
+        </p>
+        <ul>
+          <li>
+            the <strong>on-chain leg</strong> is an output locked to a script
+            that pays whoever can produce the preimage;
+          </li>
+          <li>
+            the <strong>Lightning leg</strong> is a BOLT11 invoice whose payment
+            hash is that same hash.
+          </li>
+        </ul>
+        <p>
+          Taking the on-chain leg means revealing the preimage on chain, and that
+          same preimage is what settles the Lightning payment. Neither leg can be
+          taken without the other, so there is no moment where one side has the
+          money and the other has nothing.
+        </p>
+      </section>
+
+      <section>
+        <h2>The on-chain leg</h2>
+        <p>
+          The on-chain leg is a P2WSH hash time-locked contract: one output with
+          exactly two ways to spend it.
+        </p>
+        <ul>
+          <li>
+            <strong>claim</strong> - anyone holding the preimage, signed by a
+            key chosen for this swap;
+          </li>
+          <li>
+            <strong>refund</strong> - the funder, signed by its own key, but only
+            after a locktime has passed.
+          </li>
+        </ul>
+        <p>
+          The funder can always get its money back once the timeout opens. The
+          counterparty can always take it with the preimage. That asymmetry is
+          the whole mechanism: nobody needs to be trusted, because either side
+          can exit on its own.
+          <a href="/script.html">The script page</a> walks through it opcode by
+          opcode.
+        </p>
+      </section>
+
+      <section>
+        <h2>The Lightning leg</h2>
+        <p>
+          The Lightning leg is an ordinary BOLT11 invoice that both sides already
+          agree on. The maker issues it as a <strong>hold invoice</strong>, which
+          lets it accept the payment and then decide when, or whether, to reveal
+          the preimage:
+        </p>
+        <table>
+          <thead>
+            <tr><th>State</th><th>Meaning</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>OPEN</td><td>the invoice exists, nothing is committed</td></tr>
+            <tr><td>ACCEPTED</td><td>the payer's funds are held, preimage still hidden</td></tr>
+            <tr><td>SETTLED</td><td>the preimage is revealed to the payer</td></tr>
+            <tr><td>CANCELED</td><td>the payer's funds are released, no preimage revealed</td></tr>
+          </tbody>
+        </table>
+        <p>
+          Only the maker ever issues a hold invoice. The taker just pays a normal
+          invoice, from an ordinary wallet.
+        </p>
+      </section>
+
+      <section>
+        <h2>The two directions</h2>
+
+        <h3>Pay Lightning, receive on chain</h3>
+        <ol class="steps">
+          <li>You ask for a quote and the maker offers terms and a small bond.</li>
+          <li>
+            You pay the bond over Lightning. It is not refundable, and its hash
+            is <code>sha256(sha256(preimage))</code>, so paying it cannot reveal
+            the secret that opens the on-chain leg.
+          </li>
+          <li>
+            The maker funds an HTLC that pays <em>you</em>, spendable with the
+            preimage and refundable by the maker after a timeout.
+          </li>
+          <li>
+            Your page rebuilds the HTLC address from public values and checks
+            that the deposit really pays it - it does not take the coordinator's
+            word for it.
+          </li>
+          <li>You pay the maker's hold invoice, which holds your funds.</li>
+          <li>
+            The maker settles the invoice, which reveals the preimage.
+          </li>
+          <li>
+            Your page signs a claim with the preimage using a key generated in
+            the page, and the coins are yours.
+          </li>
+        </ol>
+
+        <h3>Pay on chain, receive Lightning</h3>
+        <ol class="steps">
+          <li>
+            You paste your own Lightning invoice; the page reads the payment hash
+            out of it.
+          </li>
+          <li>
+            The maker offers terms: the deposit (your invoice, its fee, and the
+            fee to claim the deposit) and a locktime.
+          </li>
+          <li>
+            Your page builds the HTLC itself - spendable by the maker with the
+            preimage, refundable by you after the locktime.
+          </li>
+          <li>You send the deposit to that address.</li>
+          <li>
+            Once the deposit confirms, the maker pays your invoice; paying
+            reveals the preimage, which is what lets the maker take the deposit.
+          </li>
+        </ol>
+        <p>
+          There is no bond in this direction. Here your deposit is the
+          collateral: walking away only parks your own money until the locktime,
+          so the maker is not exposed the way it is when it funds first.
+        </p>
+      </section>
+
+      <section>
+        <h2>Why the timeouts differ</h2>
+        <p>
+          The two legs never unlock at the same height. Whoever funds first has
+          the strictly longer timeout, with a margin of blocks on top - enough
+          for a confirmation plus the other side's action on the slower chain.
+        </p>
+        <p>
+          Without that margin there is a gap where one side can refund a leg it
+          has already been paid on, taking both. The rule is enforced when a swap
+          is built, when it is read back off disk, and again by your page before
+          it pays.
+        </p>
+      </section>
+
+      <section>
+        <h2>Roles</h2>
+        <table>
+          <thead>
+            <tr><th>Role</th><th>Who runs it</th><th>Holds</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Taker</td>
+              <td>you</td>
+              <td>the per-swap claim key, the preimage once settled, swap state</td>
+            </tr>
+            <tr>
+              <td>Maker</td>
+              <td>the liquidity provider</td>
+              <td>inventory and channels, hold invoices, the per-swap refund key</td>
+            </tr>
+            <tr>
+              <td>Coordinator</td>
+              <td>whoever runs this site</td>
+              <td>no keys and no funds - quotes, state, chain observation</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          The coordinator is not on the critical path. Once you hold a deposit
+          and a preimage, you can claim through any relay without it.
+        </p>
+      </section>
+
+      <section>
+        <h2>Checking the deposit yourself</h2>
+        <p>
+          The page never believes the coordinator about the deposit. It rebuilds
+          the HTLC script and address from public values - the payment hash, the
+          two keys, the locktime - and asks the relay whether the transaction it
+          was told about really pays that address. A lying coordinator or relay
+          can hide the chain or refuse to broadcast, but it cannot make a
+          deposit look like something it is not.
+        </p>
+      </section>
+
+      <section>
+        <h2>Getting out: recovery</h2>
+        <p>
+          If a swap stalls, the page works out what move is left from four
+          things: the swap's state, whether the preimage has reached the page,
+          whether the deposit is still unspent, and the current height against
+          the HTLC's own locktime. The verdict is a judgement, not a service -
+          nobody can claim for you - and the page acts on it without asking,
+          because a claim only ever moves value towards you.
+        </p>
+        <p>
+          Passing the timeout is not the same as losing. The claim path has no
+          locktime, so a claim is valid at any height; the timeout only opens the
+          maker's refund. A swap past its deadline turns a safe claim into a
+          race, and the page says so rather than calling it lost.
+        </p>
+      </section>
+
+      <section>
+        <h2>More</h2>
+        <p>
+          <a href="/script.html">The bitcoin script</a> describes the on-chain
+          leg in full.
+        </p>
+      </section>
+
+      <footer>
+        <a href="/">start a swap</a>
+      </footer>
+    </main>
+  </body>
+</html>

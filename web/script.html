@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>the bitcoin script - swapsite</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <main class="doc">
+      <nav class="doc-nav">
+        <a href="/">start a swap</a>
+        <a href="/help.html">how swaps work</a>
+      </nav>
+
+      <header>
+        <h1>The bitcoin script</h1>
+        <p class="lead">
+          Every on-chain leg is one output: a P2WSH hash time-locked contract
+          with two spends. This page is that script, opcode by opcode, and what
+          each side has to present to use it.
+        </p>
+      </header>
+
+      <section>
+        <h2>The script</h2>
+        <p>The witness script, before anything is filled in:</p>
+        <pre><code>OP_IF
+    OP_SHA256 &lt;payment_hash&gt; OP_EQUALVERIFY &lt;claimant&gt; OP_CHECKSIG
+OP_ELSE
+    &lt;refund_locktime&gt; OP_CHECKLOCKTIMEVERIFY OP_DROP &lt;refunder&gt; OP_CHECKSIG
+OP_ENDIF</code></pre>
+        <p>
+          The two branches are the two ways out. The top one is the
+          <strong>claim</strong> path - pay whoever proves the preimage. The
+          bottom one is the <strong>refund</strong> path - give the funder its
+          money back, but not before the locktime. The branch to take is chosen
+          by the last item pushed in the witness.
+        </p>
+        <p>
+          Built with a real locktime and keys, the same script reads like this in
+          <code>swapx</code>'s assembly output:
+        </p>
+        <pre><code>OP_IF
+    OP_SHA256 OP_PUSHBYTES_32 &lt;hash&gt; OP_EQUALVERIFY OP_PUSHBYTES_33 &lt;claimant&gt; OP_CHECKSIG
+OP_ELSE
+    OP_PUSHBYTES_2 f401 OP_CLTV OP_DROP OP_PUSHBYTES_33 &lt;refunder&gt; OP_CHECKSIG
+OP_ENDIF</code></pre>
+        <p>
+          <code>f401</code> is the locktime as a little-endian push: two bytes,
+          <code>0x01fa</code>, which is height 506. <code>OP_CLTV</code> is
+          rust-bitcoin's name for <code>OP_CHECKLOCKTIMEVERIFY</code>.
+        </p>
+      </section>
+
+      <section>
+        <h2>Wrapped as P2WSH</h2>
+        <p>
+          The script above is not what you send coins to. Its SHA256 hash is,
+          inside a pay-to-witness-script-hash output:
+        </p>
+        <pre><code>OP_0 &lt;sha256(witness_script)&gt;</code></pre>
+        <p>
+          The address is <code>bcrt1q…</code> on regtest and <code>bc1q…</code>
+          on mainnet. To spend it, the witness must carry the full script, so the
+          spender reveals the terms it is satisfying rather than hiding them.
+        </p>
+      </section>
+
+      <section>
+        <h2>The claim path</h2>
+        <pre><code>OP_SHA256 &lt;payment_hash&gt; OP_EQUALVERIFY &lt;claimant&gt; OP_CHECKSIG</code></pre>
+        <ol class="steps">
+          <li>
+            <code>OP_SHA256</code> hashes the preimage that the witness supplies.
+          </li>
+          <li>
+            <code>OP_EQUALVERIFY</code> checks that hash against the payment
+            hash baked into the script. A wrong preimage fails here, by
+            consensus.
+          </li>
+          <li>
+            <code>OP_CHECKSIG</code> checks the signature against the claimant's
+            public key. A wrong key fails here.
+          </li>
+        </ol>
+        <p>
+          Both are required. The preimage alone does not spend the output, and
+          neither does the key alone - which is what makes it safe for one side
+          to publish the preimage, as we will see below.
+        </p>
+      </section>
+
+      <section>
+        <h2>The refund path</h2>
+        <pre><code>&lt;refund_locktime&gt; OP_CHECKLOCKTIMEVERIFY OP_DROP &lt;refunder&gt; OP_CHECKSIG</code></pre>
+        <ol class="steps">
+          <li>
+            <code>OP_CHECKLOCKTIMEVERIFY</code> fails the whole script unless the
+            spending transaction's locktime has reached the height in the
+            script. It does not pop the value; it only inspects it.
+          </li>
+          <li>
+            <code>OP_DROP</code> discards that height so the stack is clean.
+          </li>
+          <li>
+            <code>OP_CHECKSIG</code> checks the refunder's signature.
+          </li>
+        </ol>
+        <p>
+          Two things have to line up for the transaction that spends this way:
+          its <code>nLockTime</code> must be at least the script's height, and
+          its input sequence must be below the maximum so the locktime is
+          actually enforced. The refund transaction this project builds uses
+          sequence <code>0xfffffffe</code> for that reason; the claim uses the
+          maximum, because it has nothing to wait for.
+        </p>
+        <p>
+          Heights only, never times. The two chains a swap touches would have to
+          agree on a mixed comparison for wall-clock locktimes to be safe, and
+          they do not, so time-based locktimes are rejected when a swap is
+          constructed.
+        </p>
+      </section>
+
+      <section>
+        <h2>The witnesses</h2>
+        <p>
+          The last item in the witness picks the branch: a <code>1</code> takes
+          the <code>OP_IF</code> side, an empty item takes the
+          <code>OP_ELSE</code> side.
+        </p>
+        <table>
+          <thead>
+            <tr><th>Spend</th><th>Witness</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>claim</td>
+              <td><code>&lt;signature&gt; &lt;preimage&gt; &lt;1&gt; &lt;script&gt;</code></td>
+            </tr>
+            <tr>
+              <td>refund</td>
+              <td><code>&lt;signature&gt; &lt;&gt; &lt;script&gt;</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Who holds what</h2>
+        <p>
+          Roles in the script are not parties. <code>claimant</code> means
+          whoever is owed the on-chain leg, and <code>refunder</code> means
+          whoever funded it - and which party that is flips with the direction.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>Pay Lightning, receive on chain</th>
+              <th>Pay on chain, receive Lightning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>funds the HTLC</td>
+              <td>the maker</td>
+              <td>the taker</td>
+            </tr>
+            <tr>
+              <td><code>claimant</code></td>
+              <td>the taker's key, made in the page</td>
+              <td>the maker's key, fresh per swap</td>
+            </tr>
+            <tr>
+              <td><code>refunder</code></td>
+              <td>the maker's key</td>
+              <td>the taker's key</td>
+            </tr>
+            <tr>
+              <td>preimage</td>
+              <td>the maker's, revealed by settling</td>
+              <td>the taker's invoice preimage, revealed by paying</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          The claim path needs two independent things - the preimage and the
+          claimant's signature - and neither side holds both up front. The maker
+          generates the preimage but cannot spend the output with it, because its
+          only exit is the timeout behind its own key.
+        </p>
+      </section>
+
+      <section>
+        <h2>Why a published preimage is safe</h2>
+        <p>
+          Settling a hold invoice is done by handing over the preimage, and that
+          is exactly what tells the Lightning network the payment is claimable.
+          From that moment the preimage is public, so the maker publishes it on
+          settled swaps rather than making you copy it across by hand.
+        </p>
+        <p>
+          Publishing it costs nothing, because the preimage on its own does not
+          spend the output: <code>OP_CHECKSIG</code> still asks for the
+          claimant's key, which never leaves the page. The field is absent
+          entirely before the swap settles, so a swap's public view cannot be
+          read as "the secret is out" while it is still in flight.
+        </p>
+      </section>
+
+      <footer>
+        <a href="/">start a swap</a> · <a href="/help.html">how swaps work</a>
+      </footer>
+    </main>
+  </body>
+</html>

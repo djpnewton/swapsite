@@ -405,3 +405,101 @@ footer {
   font-size: 0.85rem;
   margin-top: 2rem;
 }
+
+/* Links on the app page: the two help pages, kept out of the way of the form
+   they sit above. */
+.help-links {
+  color: var(--dim);
+  font-size: 0.85rem;
+  margin: -0.5rem 0 0;
+}
+
+.help-links span {
+  margin: 0 0.35rem;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* Help pages: prose that is read rather than used, so it is narrower than the
+   app and its headings need room above them. */
+.doc {
+  max-width: 40rem;
+}
+
+.doc-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 2rem;
+  font-size: 0.85rem;
+}
+
+.doc h2 {
+  margin: 2.25rem 0 0.75rem;
+  font-size: 1.2rem;
+}
+
+.doc h3 {
+  margin: 1.75rem 0 0.5rem;
+  font-size: 1rem;
+}
+
+.doc p,
+.doc li {
+  color: var(--text);
+}
+
+.doc ul,
+.doc ol {
+  padding-left: 1.25rem;
+}
+
+.doc li {
+  margin: 0.3rem 0;
+}
+
+.doc code {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+
+.doc pre {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 0.75rem 0;
+  overflow-x: auto;
+  padding: 0.85rem 1rem;
+}
+
+.doc pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.8rem;
+  white-space: pre;
+}
+
+.doc ol.steps {
+  padding-left: 1.5rem;
+}
+
+.doc ol.steps li {
+  margin: 0.5rem 0;
+}
+
+.doc table {
+  font-size: 0.85rem;
+}
+
+.doc td {
+  font-family: inherit;
+  vertical-align: top;
+}
