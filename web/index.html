@@ -19,6 +19,18 @@
       </header>
 
       <section class="card">
+        <h2>What do you want to do?</h2>
+        <div class="tabs" id="direction">
+          <button type="button" data-direction="ln2btc">
+            Pay Lightning, receive on chain
+          </button>
+          <button type="button" data-direction="btc2ln">
+            Pay on chain, receive Lightning
+          </button>
+        </div>
+      </section>
+
+      <section class="card ln2btc-panel">
         <h2>Start a swap</h2>
         <div class="row">
           <label for="amount">You receive, in satoshis</label>
@@ -34,12 +46,54 @@
         <button id="create" class="primary">Get a quote</button>
       </section>
 
-      <section id="swaps"></section>
+      <section id="swaps" class="ln2btc-panel"></section>
+
+      <section class="card btc2ln-panel" id="btc2ln" hidden>
+        <h2>Start a swap</h2>
+        <div class="row">
+          <label for="invoice">Your Lightning invoice</label>
+          <input
+            id="invoice"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="lnbcrt…"
+          />
+        </div>
+        <p class="quote">
+          Make it in any wallet, for the amount you want, and paste it here. The
+          page reads the hash out of it itself.
+        </p>
+        <button id="start" class="primary" type="button">Get an offer</button>
+        <p class="quote" id="status"></p>
+      </section>
+
+      <section id="btc2ln-swaps" class="btc2ln-panel" hidden></section>
+
+      <section class="card" id="history">
+        <details>
+          <summary><h2>Maker Swap history</h2></summary>
+          <div class="tabs" id="history-tabs"></div>
+          <div id="history-list"></div>
+          <div class="pager" id="history-pager"></div>
+        </details>
+      </section>
+
+      <section class="card dev" id="dev" hidden>
+        <h2>DEV</h2>
+        <div class="actions">
+          <button id="retrieve" type="button">Retrieve our swaps from the server</button>
+          <button id="cleanup" type="button">Delete local swaps not on the server</button>
+        </div>
+        <p class="quote" id="dev-note"></p>
+      </section>
 
       <footer>
         <span id="foot">loading…</span>
       </footer>
     </main>
-    <script type="module" src="/app.js"></script>
+    <script type="module" src="/ln2btc.js"></script>
+    <script type="module" src="/btc2ln.js"></script>
+    <script type="module" src="/page.js"></script>
   </body>
 </html>

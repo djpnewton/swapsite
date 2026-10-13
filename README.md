@@ -46,7 +46,7 @@ To click through the same flow in a browser, start the three services and open
 
 ```bash
 target/debug/relay --listen 127.0.0.1:3100 &
-target/debug/maker serve --dir /tmp/swaps --listen 127.0.0.1:3200 &
+target/debug/maker ln2btc-serve --dir /tmp/swaps --listen 127.0.0.1:3200 &
 target/debug/coordinator serve --listen 127.0.0.1:8090 \
   --maker-url http://127.0.0.1:3200 --relay-url http://127.0.0.1:3100 \
   --dir /tmp/records --web web \

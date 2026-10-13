@@ -155,7 +155,7 @@ services:
     container_name: swapsite-maker
     entrypoint: ["/app/maker"]
     command:
-      - serve
+      - ln2btc-serve
       - --dir=/swaps
       - --listen=0.0.0.0:3200
       - --bitcoin-url=http://bitcoin:bitcoin@bitcoind:18443

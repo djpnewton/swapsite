@@ -1,8 +1,12 @@
-// The page side of a swap.
+// The ln2btc taker, in a page.
+//
+// The taker pays over Lightning first, so the work here is not paying before
+// there is something to claim: the deposit is checked against the chain from
+// this process, and the claim is signed here with the key made here.
 //
 // Every piece of cryptography happens in the wasm module. This file is the
 // plumbing around it: ask the coordinator for a quote, ask it for a swap, check
-// the deposit against the chain through the relay, pay, then claim.
+// the deposit through the relay, pay, then claim.
 //
 // What lives here that matters:
 //   - the claim key, generated in this page and never sent anywhere;
@@ -15,6 +19,8 @@
 
 import { relay } from "/relay.mjs";
 import { loadTaker } from "/taker.mjs";
+import { makeList, tabBar } from "/tabs.mjs";
+import { lightningUri, payBlock } from "/pay.mjs";
 import {
   PAGE_SIZES,
   newPager,
@@ -27,6 +33,8 @@ const taker = await loadTaker("/swapsite_wasm.wasm");
 const config = await (await fetch("/config")).json();
 const chain = relay(config.relay_url);
 
+// The key keeps its old name: renaming it to match this file would orphan the
+// swaps already in a browser, preimages included.
 const STORAGE = "swapsite.session";
 const session = JSON.parse(localStorage.getItem(STORAGE) ?? "{}");
 session.key ??= taker.keypair();
@@ -185,20 +193,25 @@ function outstanding() {
 }
 
 /**
- * Whether a swap is over, which is what puts it in the Closed tab.
+ * Whether this page is finished with a swap, which is what drops it from the
+ * list.
  *
- * Three ways to be over, and they are checked here rather than derived from one
- * field: the taker claimed it, the maker refunded it, or the verdict says there
- * is nothing left to pay or claim. The state is checked as well as the verdict
- * because a page that cannot reach the relay has no verdict at all, and a
- * refunded swap is over whatever the relay says.
+ * Three ways to be finished, and they are checked here rather than derived from
+ * one field: the taker claimed it, the maker refunded it, or the coins are gone
+ * for good. The state is checked as well as the verdict because a page that
+ * cannot reach the relay has no verdict at all, and a refunded swap is over
+ * whatever the relay says.
+ *
+ * An expired swap is deliberately *not* finished. Nothing can be done about it,
+ * but its card is the only place that says not to pay, and the history shows the
+ * maker's state rather than the verdict, so dropping it would lose the warning.
  */
 function finished(id) {
   const entry = session.swaps[id];
   return Boolean(
     entry.claimed ||
       entry.swap?.state === "refunded" ||
-      ["gone", "expired", "too_late_to_pay"].includes(verdict(id)?.action.kind),
+      verdict(id)?.action.kind === "gone",
   );
 }
 
@@ -217,6 +230,11 @@ function adoptRevealedPreimage(id) {
   if (entry.preimage || !entry.swap?.preimage) return;
   update(id, { preimage: entry.swap.preimage, error: null });
 }
+
+// Addresses typed on this page load. A paste is not a decision to claim, so
+// those wait for the button; auto-claiming is for an address that was already
+// here, from a session that reloaded with a swap half-done.
+const typedAddresses = new Set();
 
 /**
  * Do whatever a returned tab can do by itself.
@@ -241,7 +259,91 @@ async function recoverSwaps() {
       continue;
     }
     if (!entry.address) continue;
+    // An address just pasted in is the taker mid-thought, not a taker asking.
+    if (typedAddresses.has(id)) continue;
     await claim(id, { auto: true });
+  }
+}
+
+/**
+ * Adopt the swaps the server already holds for this page's key.
+ *
+ * The way back from a browser that lost its storage: a server record is enough
+ * to act on a swap, and a settled one carries the preimage that claims it.
+ * Local entries are left exactly as they are, because this page can know more
+ * about a swap than the server does - its destination address, its claim, its
+ * own view of whether the deposit is still there.
+ */
+async function adoptServerSwaps() {
+  devBusy = true;
+  devNote = null;
+  renderDev();
+
+  try {
+    const { swaps } = await api(`/swaps?claim_pubkey=${session.key.pubkey}`);
+    const have = new Set(Object.keys(session.swaps));
+    const missing = (swaps ?? []).filter((swap) => !have.has(swap.id));
+
+    for (const swap of missing) session.swaps[swap.id] = { swap };
+    if (missing.length > 0) persist();
+
+    devNote = {
+      bad: false,
+      text:
+        missing.length === 0
+          ? "Nothing to retrieve: this page already has every swap the server holds for its key."
+          : `Retrieved ${missing.length} ${
+              missing.length === 1 ? "swap" : "swaps"
+            } from the server.`,
+    };
+  } catch (error) {
+    devNote = { bad: true, text: `Retrieved nothing: ${error.message}` };
+  } finally {
+    devBusy = false;
+    renderDev();
+  }
+}
+
+/**
+ * Delete the swaps this page remembers that the server does not know.
+ *
+ * Regtest only, and deliberately: on a network that matters a swap the server
+ * has forgotten is still the taker's, and this page can hold the only copy of
+ * the preimage that claims it. On regtest the store is disposable, so those
+ * leftovers are just the debris a wiped store leaves in a browser.
+ *
+ * A server that cannot answer deletes nothing: "unknown" has to mean the server
+ * said so, not that it was unreachable. One list is enough to compare against,
+ * because this session only ever holds ln2btc swaps - btc2ln keeps its state in
+ * the page and nothing on disk.
+ */
+async function deleteUnknownSwaps() {
+  devBusy = true;
+  devNote = null;
+  renderDev();
+
+  try {
+    const { swaps } = await api("/swaps");
+    const known = new Set((swaps ?? []).map((swap) => swap.id));
+    const unknown = Object.keys(session.swaps).filter((id) => !known.has(id));
+
+    for (const id of unknown) delete session.swaps[id];
+    persist();
+
+    devNote = {
+      bad: false,
+      text:
+        unknown.length === 0
+          ? "Nothing to delete: the server knows every swap this page remembers."
+          : `Deleted ${unknown.length} local ${
+              unknown.length === 1 ? "swap" : "swaps"
+            } the server does not know.`,
+    };
+  } catch (error) {
+    devNote = { bad: true, text: `Deleted nothing: ${error.message}` };
+  } finally {
+    devBusy = false;
+    renderDev();
   }
 }
 
@@ -404,7 +506,7 @@ function card(id, entry) {
     }</dd>`,
     `<dt>deposit</dt><dd>${
       bonded
-        ? `${short(swap.deposit_txid)}:${swap.deposit_vout ?? "?"} ${
+        ? `<span class="preimage">${swap.deposit_txid}:${swap.deposit_vout ?? "?"}</span> ${
             verified ? `(${sats(verified.sats)}, ${verified.confirmations} conf)` : ""
           }`
         : "not funded yet"
@@ -417,7 +519,7 @@ function card(id, entry) {
   }
   if (preimage) rows.push(`<dt>preimage</dt><dd class="preimage">${preimage}</dd>`);
   if (claimed) {
-    rows.push(`<dt>claimed</dt><dd>${short(claimed.txid)}</dd>`);
+    rows.push(`<dt>claimed</dt><dd><span class="preimage">${claimed.txid}</span></dd>`);
   }
 
   // A spent deposit cannot be claimed, so offering the buttons would only
@@ -441,14 +543,16 @@ function card(id, entry) {
       : `<p class="quote">Pay the bond first, before height ${swap.bond_by}. The
        maker funds nothing until it is in, and it is not returned: it covers its
        on-chain fees either way.</p>
-       <pre class="bolt11">${swap.bond_bolt11}</pre>`;
+       <pre class="bolt11">${swap.bond_bolt11}</pre>
+       ${payBlock(lightningUri(swap.bond_bolt11), { raw: swap.bond_bolt11 })}`;
 
   // The invoice, shown whether or not this page can pay it. Paying from another
   // wallet is the real flow; the dev shortcut is only a shortcut.
   const invoice =
     bonded && !preimage && swap.bolt11 && payable
       ? `<p class="quote">Pay this invoice, from any wallet on this network:</p>
-         <pre class="bolt11">${swap.bolt11}</pre>`
+         <pre class="bolt11">${swap.bolt11}</pre>
+         ${payBlock(lightningUri(swap.bolt11), { raw: swap.bolt11 })}`
       : "";
 
   const actions = [];
@@ -510,9 +614,7 @@ function card(id, entry) {
       ${notice(recovery)}
       ${
         claimed
-          ? `<p class="ok">Claimed${claimed.auto ? " automatically" : ""} in ${short(
-              claimed.txid,
-            )}. That is the swap done.</p>`
+          ? `<p class="ok">Claimed${claimed.auto ? " automatically" : ""} in <span class="preimage">${claimed.txid}</span>. That is the swap done.</p>`
           : ""
       }
       ${error ? `<p class="error">${error}</p>` : ""}
@@ -546,52 +648,57 @@ function notice(recovery) {
 
 let lastMarkup = "";
 
-// The list is split by what is left to do about it, because that is the
-// question a taker has: anything still in flight, and anything already over.
-const TABS = [
-  ["active", "Active"],
-  ["closed", "Closed"],
-  ["all", "All"],
-];
-
-let tab = "active";
 const pager = newPager();
 
-function tabBar(counts) {
-  const buttons = TABS.map(
-    ([key, label]) =>
-      `<button data-tab="${key}"${key === tab ? ' class="on"' : ""}>` +
-      `${label} <span class="count">${counts[key]}</span></button>`,
-  ).join("");
+// The list's own state: which tab, and which swaps it has let go. A different
+// question from the history's tabs - that one covers every swap the server
+// knows, this one only the swaps this browser remembers.
+const list = makeList((id) => finished(id));
 
-  return `<div class="tabs">${buttons}</div>`;
+// What the last regtest tool said, and whether one is running.
+let devNote = null;
+let devBusy = false;
+
+/**
+ * The regtest-only tools, written straight into their box at the foot of the
+ * page.
+ *
+ * Not part of the list markup: they are not swaps, and nothing about them
+ * changes when the poll repaints. Both are session bookkeeping against the
+ * server's copy, and both are kept to regtest - elsewhere a swap the server has
+ * forgotten is still the taker's, and this page can hold the only preimage that
+ * claims it.
+ */
+function renderDev() {
+  $("retrieve").disabled = devBusy;
+  $("cleanup").disabled = devBusy;
+  $("dev-note").className = devNote ? (devNote.bad ? "error" : "ok") : "quote";
+  $("dev-note").textContent = devNote?.text ?? "";
 }
 
-/** The tabs, the cards for this page, and the pager, as one piece of markup. */
+/**
+ * The tabs, the cards for this page's swaps, and the pager.
+ *
+ * Newest first, in every tab. A swap leaves the list when there is nothing left
+ * to say about it, except an expired one: its card is the only place that says
+ * not to pay, so it is not the page's to drop.
+ */
 function listMarkup() {
-  // Newest first, in every tab.
   const ids = Object.keys(session.swaps).reverse();
-  const counts = {
-    active: ids.filter((id) => !finished(id)).length,
-    closed: ids.filter(finished).length,
-    all: ids.length,
-  };
-
-  const showing = ids.filter(
-    (id) => tab === "all" || (tab === "closed") === finished(id),
-  );
-  const view = paginate(showing, pager);
+  const now = Date.now();
+  const counts = list.counts(ids, now);
+  const view = paginate(list.pick(ids, now), pager);
 
   if (view.total === 0) {
-    const note = ids.length === 0 ? "No swaps yet." : `Nothing ${tab} here.`;
-    return `${tabBar(counts)}<p class="quote">${note}</p>`;
+    const note = ids.length === 0 ? "No swaps yet." : `Nothing ${list.tab} here.`;
+    return `${tabBar(list.tab, counts)}<p class="quote">${note}</p>`;
   }
 
   const cards = view.rows.map((id) => card(id, session.swaps[id])).join("");
   // A pager on a list of three is noise: it arrives with the second page.
   const controls = view.total > PAGE_SIZES[0] ? pagerHtml(view) : "";
 
-  return `${tabBar(counts)}${cards}${controls}`;
+  return `${tabBar(list.tab, counts)}${cards}${controls}`;
 }
 
 function render() {
@@ -615,10 +722,15 @@ function render() {
 $("create").addEventListener("click", create);
 $("amount").addEventListener("change", () => askQuote().catch(() => {}));
 
+// The regtest-only box, and none of it on a network that matters.
+$("dev").hidden = config.network !== "regtest";
+$("retrieve").addEventListener("click", adoptServerSwaps);
+$("cleanup").addEventListener("click", deleteUnknownSwaps);
+
 $("swaps").addEventListener("click", async (event) => {
   const chosen = event.target.closest("button[data-tab]");
   if (chosen) {
-    tab = chosen.dataset.tab;
+    list.choose(chosen.dataset.tab);
     pager.page = 1; // a new tab starts at its own first page
     return render();
   }
@@ -666,7 +778,10 @@ $("swaps").addEventListener("input", (event) => {
   const { addr, preimage } = event.target.dataset;
 
   // Held in the session so a reload does not lose a paste in progress.
-  if (addr) session.swaps[addr].address = event.target.value;
+  if (addr) {
+    session.swaps[addr].address = event.target.value;
+    typedAddresses.add(addr);
+  }
   if (preimage) session.swaps[preimage].typedPreimage = event.target.value;
   if (addr || preimage) persist();
 });

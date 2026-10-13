@@ -185,7 +185,7 @@ Three processes, then the page:
 
 ```bash
 target/debug/relay --listen 127.0.0.1:3100 &
-target/debug/maker serve --dir /tmp/swaps --listen 127.0.0.1:3200 &
+target/debug/maker ln2btc-serve --dir /tmp/swaps --listen 127.0.0.1:3200 &
 target/debug/coordinator serve --listen 127.0.0.1:8090 \
   --maker-url http://127.0.0.1:3200 --relay-url http://127.0.0.1:3100 \
   --dir /tmp/records --web web \
@@ -209,7 +209,7 @@ as long as it remembers a destination address. Mine up to the locktime instead
 and the warning turns into a race. Mine past the point where a payment made now
 would no longer expire in time - the invoice's CLTV delta plus the margin - and
 the page stops offering the pay button, because a maker that can refund and then
-settle takes both legs. `maker new-swap` refuses to offer such a swap at all,
+settle takes both legs. `maker ln2btc-new` refuses to offer such a swap at all,
 which `regtest-maker.sh` asserts along with the floor being accepted.
 
 `scripts/regtest-coordinator.sh` and `scripts/regtest-recovery.sh` run the same
@@ -366,7 +366,7 @@ directly against the node's gRPC port, naming the credentials rather than relyin
 on a home directory to find them:
 
 ```bash
-maker serve --lnd-rpc lnd-maker:10009 --lnd-dir /lnd-maker
+maker ln2btc-serve --lnd-rpc lnd-maker:10009 --lnd-dir /lnd-maker
 ```
 
 `--lnd-dir` holds `tls.cert` and `data/chain/bitcoin/<network>/admin.macaroon`.

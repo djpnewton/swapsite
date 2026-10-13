@@ -38,6 +38,12 @@ code {
   font-size: 0.85rem;
 }
 
+/* A note that carries a whole transaction id or preimage: it wraps rather than
+   pushing the card wider. */
+#node-note {
+  overflow-wrap: anywhere;
+}
+
 /* The panel's own bits, on top of the page's stylesheet. */
 
 table {

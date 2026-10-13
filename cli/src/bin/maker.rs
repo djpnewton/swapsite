@@ -857,6 +857,12 @@ impl Api {
         if request.matches("POST", "/btc2ln/sweep").is_some() {
             return self.btc2ln_sweep();
         }
+        if request.matches("GET", "/history").is_some() {
+            return match history(&self.config) {
+                Ok(rows) => Response::json(200, &json!({ "swaps": rows })),
+                Err(e) => Response::error(500, e.to_string()),
+            };
+        }
         Response::not_found()
     }
 
@@ -981,6 +987,54 @@ impl Api {
     }
 }
 
+/// The order book, joined with the live state of each swap.
+///
+/// The order says what was agreed and never changes; the state comes from the
+/// record it points at, which is the one place it is kept. A mechanism is
+/// matched to the end here, so a new one has to say where its records live.
+fn history(config: &NodeConfig) -> Result<Vec<serde_json::Value>> {
+    let orders = config.order_store()?;
+    let ln2btc = config.store()?;
+    let btc2ln = config.btc2ln_store()?;
+
+    let mut rows = Vec::new();
+    for order in orders.all()? {
+        let mut row = json!({
+            "id": order.id,
+            "kind": order.kind,
+            "at": order.at,
+            "from": order.from,
+            "to": order.to,
+            "cost_sat": order.cost_sat(),
+        });
+
+        // An order whose record is missing is half of a pair: skipped rather
+        // than shown, since nothing could be done with it.
+        match order.kind {
+            SwapKind::Ln2btc => match ln2btc.load(&order.id) {
+                Ok(record) => {
+                    row["state"] = json!(record.state.to_string());
+                    row["locktime"] = json!(record.locktime);
+                }
+                Err(_) => continue,
+            },
+            SwapKind::Btc2ln => match btc2ln.load(&order.id) {
+                Ok(record) => {
+                    row["state"] = json!(record.state());
+                    row["locktime"] = json!(record.locktime);
+                }
+                Err(_) => continue,
+            },
+        }
+
+        rows.push(row);
+    }
+
+    // Newest first, which is how a history reads.
+    rows.sort_by(|a, b| b["at"].as_u64().cmp(&a["at"].as_u64()));
+    Ok(rows)
+}
+
 /// Everything a taker needs to fund a btc2ln deposit, and to check it.
 fn btc2ln_offer_json(record: &Btc2lnRecord, network: Network) -> Result<serde_json::Value> {
     Ok(json!({
@@ -1019,7 +1073,7 @@ fn tick(config: &NodeConfig) -> Result<()> {
 
         match plan(&record, &observed) {
             // Nothing worth logging every tick: the state transitions above
-            // and `maker status` are where progress shows up.
+            // and `maker ln2btc-status` are where progress shows up.
             Action::Wait(_) | Action::Done => {}
 
             Action::Fund => match fund_swap(&mut record, config, &chain) {

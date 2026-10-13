@@ -153,6 +153,22 @@ impl Btc2lnRecord {
     pub fn address(&self, network: Network) -> Result<Address, Btc2lnError> {
         Ok(self.htlc()?.address(network))
     }
+
+    /// What this swap is, from the record alone: the label a listing shows.
+    ///
+    /// Coarser than [`plan`], which is also given the height and so can tell a
+    /// deposit still in time from one whose window has closed.
+    pub fn state(&self) -> &'static str {
+        if self.claim_txid.is_some() {
+            "claimed"
+        } else if self.preimage.is_some() {
+            "paid"
+        } else if self.deposit.is_some() {
+            "funded"
+        } else {
+            "offered"
+        }
+    }
 }
 
 /// Facts from outside, gathered once per tick.
@@ -370,6 +386,24 @@ mod tests {
     #[test]
     fn a_deposit_covers_the_invoice_the_fee_and_the_claim() {
         assert_eq!(deposit_sat(1_000, 10, 2_000), 3_010);
+    }
+
+    #[test]
+    fn a_swap_is_named_by_what_it_has_collected() {
+        let mut record = record(10);
+        // The fixture already has a deposit, so start it before the point under
+        // test.
+        record.deposit = None;
+        assert_eq!(record.state(), "offered");
+
+        record.deposit = Some(OutPoint::from_str(&format!("{}:0", "11".repeat(32))).unwrap());
+        assert_eq!(record.state(), "funded");
+
+        record.preimage = Some("22".repeat(32));
+        assert_eq!(record.state(), "paid");
+
+        record.claim_txid = Some("33".repeat(32));
+        assert_eq!(record.state(), "claimed");
     }
 
     #[test]

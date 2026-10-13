@@ -227,6 +227,9 @@ impl Service {
         if request.matches("GET", "/btc2ln/swaps").is_some() {
             return self.forward("GET", "/btc2ln/swaps", "");
         }
+        if request.matches("GET", "/history").is_some() {
+            return self.forward("GET", "/history", "");
+        }
 
         self.file(&request.path)
     }
@@ -616,7 +619,7 @@ mod tests {
         // `web/` really does contain these.
         let service = service(false);
         assert_eq!(service.route(&request("GET", "/", "")).status, 200);
-        assert_eq!(service.route(&request("GET", "/app.js", "")).status, 200);
+        assert_eq!(service.route(&request("GET", "/ln2btc.js", "")).status, 200);
         assert_eq!(service.route(&request("GET", "/nope.js", "")).status, 404);
     }
 

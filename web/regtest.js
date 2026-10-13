@@ -312,7 +312,7 @@ async function payInvoice() {
   $("node-note").textContent = "paying…";
   try {
     const { preimage } = await api("/taker/pay", { bolt11: $("pay-req").value.trim() });
-    $("node-note").textContent = `paid, preimage ${short(preimage, 16, 8)}`;
+    $("node-note").innerHTML = `paid, preimage <span class="preimage">${preimage}</span>`;
     $("pay-req").value = "";
   } catch (error) {
     $("node-note").textContent = `payment failed: ${error.message}`;
@@ -347,7 +347,7 @@ async function sendCoins() {
       address: $("send-addr").value.trim(),
       sats: Number($("send-amt").value),
     });
-    $("node-note").textContent = `sent on chain, tx ${short(txid, 16, 8)}`;
+    $("node-note").innerHTML = `sent on chain, tx <span class="preimage">${txid}</span>`;
     $("send-addr").value = "";
   } catch (error) {
     $("node-note").textContent = `send failed: ${error.message}`;

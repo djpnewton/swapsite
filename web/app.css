@@ -212,6 +212,81 @@ dd {
   overflow-wrap: anywhere;
 }
 
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+  font-size: 0.9rem;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.45rem 0.75rem 0.45rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+th {
+  color: var(--dim);
+  font-weight: 500;
+}
+
+td {
+  font-family: ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+
+tr:last-child td {
+  border-bottom: none;
+}
+
+tr.closed td {
+  color: var(--dim);
+}
+
+/* The history is the maker's book rather than this page's swaps, so it starts
+   folded away instead of pushing the swaps off the screen. */
+#history summary {
+  cursor: pointer;
+}
+
+#history summary h2 {
+  display: inline;
+  margin: 0;
+}
+
+#history details[open] summary {
+  margin-bottom: 0.75rem;
+}
+
+/* The regtest-only tools at the foot of the page: they drive a stack, so they
+   stay small and dim and out of the way of the swapping itself. */
+.dev {
+  padding: 0.9rem 1.25rem;
+  font-size: 0.8rem;
+}
+
+.dev h2 {
+  margin-bottom: 0.5rem;
+  color: var(--dim);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.dev .actions {
+  margin-top: 0;
+}
+
+.dev button {
+  padding: 0.3rem 0.6rem;
+}
+
+.dev .ok,
+.dev .error {
+  font-size: 0.8rem;
+}
+
 .actions {
   display: flex;
   gap: 0.5rem;
@@ -246,7 +321,75 @@ dd {
   user-select: all;
 }
 
-/* A preimage is 64 hex characters that exist to be copied out whole. */
+/* The link, the control that copies, and the value they act on.
+
+   The URI is not printed: a bolt11 is 300 characters that already sit above
+   this row in full, so the link only has to be clickable and the copy control
+   only has to give the value a form will accept. */
+.pay-row {
+  align-items: center;
+  display: flex;
+  gap: 0.4rem;
+  margin: 0.5rem 0 0;
+}
+
+.pay-link,
+.copy {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--dim);
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  padding: 0.3rem 0.7rem;
+}
+
+.pay-link {
+  text-decoration: none;
+}
+
+.copy {
+  cursor: pointer;
+}
+
+.copy:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* A value a wallet's own field wants pasted into it: no scheme, no query, and
+   short enough to show in full. */
+.raw {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--dim);
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  margin: 0.5rem 0 0;
+  overflow-wrap: anywhere;
+  padding: 0.6rem;
+  user-select: all;
+}
+
+/* A payment code, drawn as SVG: dark on white whatever the page is doing, and
+   sized so a phone has something to read. Scanned, not admired. */
+.qr {
+  margin: 0.75rem 0 0;
+}
+
+.qr svg {
+  background: #fff;
+  border-radius: 8px;
+  display: block;
+  height: auto;
+  max-width: 100%;
+  width: 12rem;
+}
+
+/* A value that exists to be copied out whole - a preimage, an address, an
+   outpoint - and that a second click would only select in part. One click
+   selects all of it. */
 .preimage {
   user-select: all;
 }
