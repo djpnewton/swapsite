@@ -57,9 +57,14 @@ sleep 0.5
 
 # A browser is not something this project ships, and its absence is not a broken
 # page: the test says so and passes, and `scripts/test.sh --regtest` stays usable
-# on a machine without one.
+# on a machine without one. `REQUIRE_CHROME` is for where a browser is expected -
+# CI - so that its absence is a failure rather than the DOM test quietly no
+# longer running.
 if ! command -v "${CHROME:-google-chrome}" > /dev/null 2>&1; then
   echo "skipped: no ${CHROME:-google-chrome} on this machine" >&2
+  if [ "${REQUIRE_CHROME:-}" = "1" ]; then
+    fail "REQUIRE_CHROME is set but ${CHROME:-google-chrome} is not installed"
+  fi
   exit 0
 fi
 

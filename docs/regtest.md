@@ -105,9 +105,17 @@ needs `cargo`, `python3` and a running compose stack; `regtest-wasm.sh`,
 `regtest-coordinator.sh`, `regtest-recovery.sh` and `regtest-ui.sh` also need
 `node` and the `wasm32-unknown-unknown` target
 (`rustup target add wasm32-unknown-unknown`). `regtest-ui.sh` needs chrome as
-well, and skips itself rather than failing where there is none.
+well, and skips itself rather than failing where there is none; set
+`REQUIRE_CHROME=1` to make that absence a failure.
 The daemon and service scripts kill anything left over from an earlier run
 before they start.
+
+All of it runs in CI. `.github/workflows/ci.yml` runs on every push and pull
+request, as three jobs: `scripts/format.sh --check`, `scripts/test.sh`, and this
+whole suite via `scripts/test.sh --regtest`. That last job brings the compose
+stack up first, without the `web` profile, whose services would hold the
+scripts' ports, and sets `REQUIRE_CHROME=1` so `regtest-ui.sh` runs rather than
+skips.
 
 Each swap moves real balance from the taker to the maker over Lightning, so a
 long series of runs drains the taker's outbound capacity. The scripts refuse to

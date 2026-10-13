@@ -26,7 +26,8 @@ free: the taker would risk nothing while the maker's capital sat in the HTLC for
 the whole locktime.
 
 ```bash
-cargo test                       # unit tests, includes real script verification
+./scripts/test.sh                # clippy, cargo test, the wasm build and the JS tests
+./scripts/test.sh --regtest      # the above, then every regtest script in order
 ./scripts/format.sh              # rustfmt, then node --check and bash -n
 ./scripts/format.sh --check      # the same, changing nothing
 ./scripts/dev.sh                 # mine, lncli, bitcoin-cli, logs, records
@@ -39,7 +40,24 @@ docker compose -f docker/docker-compose.yml up -d
 ./scripts/regtest-wasm.sh        # the browser-side taker, through a relay
 ./scripts/regtest-coordinator.sh # the whole flow: quote, verify, pay, claim, recover
 ./scripts/regtest-recovery.sh    # a lost page, a deadline, and a maker that reneges
+./scripts/regtest-ui.sh          # the page itself, driven in a real browser
+./scripts/regtest-ui.sh --show   # the same, with the browser on screen
 ```
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request.
+Three jobs, in increasing cost, each running one of the scripts above rather
+than its own copy of the commands, so a red build is a failure that reproduces
+locally:
+
+- formatting and syntax: `./scripts/format.sh --check`;
+- clippy, tests, wasm and the page: `./scripts/test.sh`;
+- the regtest suite: the docker stack, then `./scripts/test.sh --regtest` -
+  every script in order, including `regtest-ui.sh`, which drives the page in
+  Chrome. The job sets `REQUIRE_CHROME=1`, so a runner without a browser fails
+  rather than skipping the only test that reads the DOM.
+
 
 To click through the same flow in a browser, start the three services and open
 <http://127.0.0.1:8090/>:

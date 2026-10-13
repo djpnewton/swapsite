@@ -1,0 +1,123 @@
+name: CI
+
+# Three jobs, in increasing cost: formatting and syntax, the tests with the wasm
+# module, then the whole regtest suite against docker, a real chain and a
+# browser. The last one is minutes rather than seconds, which is why it is a job
+# of its own - but it is the only one that can catch a swap that no longer
+# works.
+#
+# Every job runs the project's own scripts rather than a copy of their commands,
+# so a failure here is the same failure as `./scripts/format.sh --check` or
+# `./scripts/test.sh [--regtest]` on a laptop.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch makes the first run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: formatting and syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: Swatinem/rust-cache@v2
+
+      # rustfmt, node --check on web/*.{js,mjs} and bash -n on scripts/*.sh.
+      - run: ./scripts/format.sh --check
+
+  test:
+    name: clippy, tests, wasm and the page
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner image already carries clang and g++: clang is what `cc`
+      # needs for secp256k1's C sources on wasm32, and g++ is what the
+      # bitcoinconsensus dev-dependency needs natively.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: Swatinem/rust-cache@v2
+
+      # clippy with warnings denied, cargo test (which runs the real script
+      # interpreter through bitcoinconsensus), the wasm build, an assertion that
+      # the module still has no imports, and node --test web/*.test.mjs.
+      - run: ./scripts/test.sh
+
+  regtest:
+    name: the regtest scripts
+    runs-on: ubuntu-latest
+    # The scripts mine several hundred blocks between them and each waits on a
+    # daemon, so the default ten minutes is not enough.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner image carries clang, g++ and Chrome: clang and g++ are what
+      # the wasm build and the consensus tests need, and Chrome is what
+      # `regtest-ui.sh` drives.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: the browser the page test drives
+        run: google-chrome --version
+
+      # No `--profile web`: the scripts start the relay, maker and coordinator
+      # themselves, on the ports they expect, and the profile's copies would
+      # hold them.
+      - name: start the nodes
+        run: docker compose -f docker/docker-compose.yml up -d
+
+      # The same script as a laptop, which repeats this workflow's fast checks
+      # and then runs the nine regtest scripts in order. `REQUIRE_CHROME` turns
+      # `regtest-ui.sh`'s "no browser on this machine" skip into a failure, so
+      # the only test that reads the DOM cannot quietly stop running.
+      - name: the regtest scripts
+        env:
+          REQUIRE_CHROME: "1"
+        run: ./scripts/test.sh --regtest
+
+      - name: the nodes' logs
+        if: failure()
+        run: docker compose -f docker/docker-compose.yml logs --tail 100
+
+      # The runner throws its containers away anyway, so this is for the logs
+      # above reading cleanly rather than for hygiene.
+      - name: stop the nodes
+        if: always()
+        run: docker compose -f docker/docker-compose.yml down -v

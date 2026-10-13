@@ -28,6 +28,10 @@ struct Cli {
     cmd: Cmd,
 }
 
+// `Serve` carries every deployment flag, so it is the largest variant by far.
+// Boxing it would only be to satisfy the lint: clap parses these in place, and a
+// box around any one field is not something it can derive into.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Cmd {
     /// Serve the API and the page.

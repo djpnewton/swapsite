@@ -102,7 +102,7 @@ impl Order {
         // Only comparable while both sides are the same asset, which is the
         // question the kind above has to answer.
         if kind.both_sides_are_sats() && from < to {
-            return Err(OrderError::NotASwap { from: from, to: to });
+            return Err(OrderError::NotASwap { from, to });
         }
         Ok(Self {
             id: id.into(),
